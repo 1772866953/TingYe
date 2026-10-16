@@ -1,7 +1,3 @@
-# 听页 TingYe
-
-简体中文离线有声小说播放器。音频来自用户选择的本地文件；应用不申请网络权限。
-
 ## 环境与构建
 
 - 完整 JDK 17 或 21（需要 `jlink`）；Android SDK Platform 36、Build Tools 35.0.0。最低支持 Android 8.0，目标 API 36。
@@ -31,11 +27,6 @@
 版本与系统行为依据：[AGP 8.13 兼容表](https://developer.android.com/build/releases/agp-8-13-0-release-notes)、[MediaSessionService 后台播放](https://developer.android.com/media/media3/session/background-playback)、[SAF 持久 URI 权限](https://developer.android.com/training/data-storage/shared/documents-files)、[Google Play 目标 API 要求](https://support.google.com/googleplay/android-developer/answer/11926878?hl=en)。
 
 ## 发布
-
-当前版本 0.1.8，正式构建开启代码与资源裁剪。原工作区的 `scripts/build-release.ps1` 依赖本机工具链，并将交付文件保存到 `../releases/0.1.8/`；普通克隆使用 Gradle Wrapper 构建。真实签名文件与配置不提交仓库，仅提供[配置模板](../signing/release.properties.example)。
-
-支持章节已听标记、耳机上一首／下一首自定义、桌面播放器小组件、导入书名与封面预览、简洁收听统计、音量均衡，以及可配置 1–12s 的进度恢复提示。快进快退、上下章和进度条提交后自动播放；恢复刚才位置保留当前播放／暂停状态。数据库支持旧版本连续升级，保留章节进度。
-
 构建时加 `-Test` 会运行单元测试后生成正式包。`scripts/check-listening-features.py` 用于受控 MuMu 测试库的定向验证；`scripts/prepare-metadata-fixture.py` 生成可复用的元数据与封面测试素材。
 
-仓库结构与构建说明见上级 README。模拟器脚本依赖原测试环境和自行准备的音频；本机工具链、测试音频、安装包与混淆映射不纳入源码仓库。
+仓库结构与构建说明见上级 README。模拟器脚本依赖原测试环境和自行准备的音频
