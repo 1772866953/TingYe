@@ -1,0 +1,4 @@
+<resources>
+    <string name="playback_channel_name">收听播放</string>
+    <string name="widget_description">继续收听，查看章节并控制播放</string>
+</resources>

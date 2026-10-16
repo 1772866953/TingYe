@@ -1,0 +1,6 @@
+# Copy to release.properties and fill in locally. Never commit real credentials.
+# Relative paths are resolved from the Android project directory: TingYe/.
+storeFile=../signing/your-release.jks
+storePassword=REPLACE_WITH_STORE_PASSWORD
+keyAlias=REPLACE_WITH_KEY_ALIAS
+keyPassword=REPLACE_WITH_KEY_PASSWORD
