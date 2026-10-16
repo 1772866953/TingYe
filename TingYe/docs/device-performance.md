@@ -28,6 +28,5 @@
 - `video_contacts.py 标签`：生成录制联系图，需要 Pillow。
 - `ui_probe.py`：查看控件、按名称点击、截图。
 
-这些脚本位于 scripts，依赖准备好的测试书架，不直接对用户手机运行。录制检查运动交接，逐帧时间检查性能；模拟器不能确认真实马达、VIVO 锁屏策略或真机 120Hz，GIF 的 50fps 导出不代表实际设备帧率。
 
 通知参考：[MediaSessionService](https://developer.android.com/media/media3/session/background-playback)、[Media3 通知实现](https://github.com/androidx/media/blob/1.10.0/libraries/session/src/main/java/androidx/media3/session/DefaultMediaNotificationProvider.java)。
