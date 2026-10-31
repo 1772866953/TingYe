@@ -27,8 +27,6 @@
 
 ## 界面
 
-以下为 Android 模拟器和 PC 隔离测试环境截图。书名、正文及书架均为合成测试数据，不含真机数据。
-
 <p>
   <img src="assets/screenshots/bookshelf.png" alt="合成书库" width="30%" />
   <img src="assets/screenshots/player.png" alt="播放器" width="30%" />
