@@ -135,6 +135,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun select(id: Long) { _selected.value = id }
 
+    fun pauseForReading() {
+        if(!desiredAutoplay && pendingPlay==null && playRequestJob?.isActive!=true &&
+            controller?.playWhenReady!=true && controller?.isPlaying!=true)return
+        desiredAutoplay = false
+        pendingPlay = null
+        playRequestJob?.cancel()
+        controller?.pause()
+        refresh()
+    }
+
     fun playBook(id: Long, chapterIndex: Int? = null, autoplay: Boolean = true,
         exactPositionMs: Long? = null) {
         playRequestJob?.cancel()
@@ -411,6 +421,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
     fun theme(value: String) = viewModelScope.launch { preferences.theme(value) }
+    fun wallpaper(uri:String?)=viewModelScope.launch{preferences.wallpaper(uri)}
+    fun wallpaperBlur(value:Int)=viewModelScope.launch{preferences.wallpaperBlur(value)}
+    fun glass(value:com.tingye.app.data.GlassAppearance)=viewModelScope.launch{preferences.glass(value)}
     fun skips(back: Int, forward: Int) = viewModelScope.launch { preferences.skips(back, forward) }
     fun resumeBack(seconds: Int) = viewModelScope.launch { preferences.resumeBack(seconds) }
     fun skipEdges(intro: Int, outro: Int) = viewModelScope.launch { preferences.skipEdges(intro, outro) }
@@ -469,9 +482,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     fun dismissBackup() { _backupPreview.value = null; _backupMessage.value = null }
     fun transitionSpeed(value: Float) = viewModelScope.launch { preferences.transitionSpeed(value) }
-    fun wallpaper(value: String) = viewModelScope.launch { preferences.wallpaper(value) }
-    fun customWallpaper(uri: Uri) = viewModelScope.launch { preferences.customWallpaper(uri.toString()) }
-    fun wallpaperBlur(value: Float) = viewModelScope.launch { preferences.wallpaperBlur(value) }
     fun hapticStrength(value: Int) = viewModelScope.launch { preferences.hapticStrength(value) }
 
     override fun onCleared() {

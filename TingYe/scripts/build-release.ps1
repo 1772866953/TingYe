@@ -1,4 +1,5 @@
-param([switch]$Offline, [switch]$Test)
+param([switch]$Offline, [switch]$Test,
+    [ValidateSet('arm64-v8a','armeabi-v7a','x86','x86_64','universal')][string]$Abi = 'arm64-v8a')
 $ErrorActionPreference = 'Stop'
 $projectRoot = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
 $workspaceRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot '..'))
@@ -11,6 +12,7 @@ $gradle = Join-Path $workspaceRoot 'tools\gradle-8.13\bin\gradle.bat'
 $arguments = @('assembleRelease', '--no-parallel', '-Pkotlin.compiler.execution.strategy=in-process')
 if ($Test) { $arguments = @('testReleaseUnitTest') + $arguments }
 if ($Offline) { $arguments += '--offline' }
+if ($Abi -ne 'universal') { $arguments += "-Ptingye.abi=$Abi" }
 Push-Location $projectRoot
 try {
     & $gradle @arguments

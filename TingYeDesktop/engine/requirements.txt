@@ -1,0 +1,5 @@
+funasr==1.4.3
+rapidfuzz==3.14.3
+beautifulsoup4==4.14.3
+mutagen==1.47.0
+soundfile==0.13.1

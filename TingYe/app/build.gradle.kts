@@ -19,9 +19,15 @@ android {
         applicationId = "com.tingye.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 9
-        versionName = "0.1.8"
-        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
+        versionCode = 29
+        versionName = "0.5.0"
+        providers.gradleProperty("tingye.abi").orNull?.let { requested ->
+            val abis = requested.split(',')
+            require(abis.all { it in setOf("arm64-v8a", "armeabi-v7a", "x86", "x86_64") })
+            ndk { abiFilters += abis }
+        }
+        testInstrumentationRunner = if(providers.gradleProperty("tingye.syncQa").isPresent)
+            "com.tingye.app.SyncRegressionInstrumentation" else "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {
         getByName("debug") {
@@ -36,6 +42,9 @@ android {
         }
     }
     buildTypes {
+        getByName("debug") {
+            if(providers.gradleProperty("tingye.syncQa").isPresent)applicationIdSuffix=".syncqa"
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
@@ -54,7 +63,11 @@ android {
     compileOptions { sourceCompatibility = JavaVersion.VERSION_17; targetCompatibility = JavaVersion.VERSION_17 }
     kotlinOptions { jvmTarget = "17" }
     buildFeatures { compose = true }
-    packaging { resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" } }
+    // Compressed native libraries are extracted during installation.
+    packaging {
+        jniLibs { useLegacyPackaging = true }
+        resources { excludes += "/META-INF/{AL2.0,LGPL2.1}" }
+    }
 }
 kapt { arguments { arg("room.schemaLocation", "$projectDir/schemas") } }
 dependencies {
@@ -64,6 +77,7 @@ dependencies {
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
+    implementation("org.jsoup:jsoup:1.23.2")
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.activity:activity-compose:1.13.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.4")

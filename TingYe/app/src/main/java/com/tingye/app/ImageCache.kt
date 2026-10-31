@@ -101,9 +101,7 @@ private object ImageCache {
     }
 }
 
-internal suspend fun preloadWallpaperImage(context: Context, uri: String) {
-    ImageCache.load(context.applicationContext, uri, 1600)
-}
+
 internal suspend fun loadWidgetCover(context: Context, uri: String): Bitmap? = ImageCache.load(context.applicationContext, uri, 256)
 
 @Composable internal fun rememberImage(uri: String?, maxDimension: Int): ImageBitmap? {

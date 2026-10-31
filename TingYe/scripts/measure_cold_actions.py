@@ -1,11 +1,12 @@
 from pathlib import Path
 import subprocess,time,sys,json,re
+import xml.etree.ElementTree as ET
 root=Path(__file__).resolve().parents[2];adb=[r'C:\Software\MuMu Player 12\shell\adb.exe','-s','127.0.0.1:16384']
 def sh(*a):return subprocess.check_output(adb+['shell',*map(str,a)])
 tag=sys.argv[1];out=root/'qa/results/performance';out.mkdir(exist_ok=True)
 sh('am','force-stop','com.tingye.app');sh('am','start','-W','-n','com.tingye.app/.MainActivity');time.sleep(.3)
 results={}
-for name,args in [('player-open',('input','tap',480,1220)),('player-close',('input','keyevent',4)),('settings-open',('input','tap',810,174)),('settings-close',('input','keyevent',4)),('second-player',('input','tap',480,1220)),('second-close',('input','keyevent',4))]:
+for name,args in [('player-open',('input','tap',480,1370)),('player-close',('input','keyevent',4)),('settings-open',('input','tap',792,174)),('settings-close',('input','keyevent',4)),('second-player',('input','tap',480,1370)),('second-close',('input','keyevent',4))]:
     sh('dumpsys','gfxinfo','com.tingye.app','reset');sh(*args);time.sleep(.8)
     data=sh('dumpsys','gfxinfo','com.tingye.app','framestats').decode();(out/f'{tag}-{name}-frames.txt').write_text(data)
     header=None;durations=[];cpu=[];gaps=[];intended=[]
@@ -22,5 +23,13 @@ for name,args in [('player-open',('input','tap',480,1220)),('player-close',('inp
     results[name]={'frames':len(durations),'p50':round(durations[len(durations)//2],2) if durations else None,
         'p95':round(durations[min(len(durations)-1,int(len(durations)*.95))],2) if durations else None,'max':round(max(durations),2) if durations else None,
         'over16.7':sum(d>16.7 for d in durations),'over33.3':sum(d>33.3 for d in durations),'cpuMax':round(max(cpu),2) if cpu else None}
+    sh('uiautomator','dump','/sdcard/tingye-frame-check.xml')
+    ui=ET.fromstring(sh('cat','/sdcard/tingye-frame-check.xml').decode())
+    labels={n.get('text') or n.get('content-desc') for n in ui.iter('node') if n.get('package')=='com.tingye.app'}
+    expected='收起播放器' if name in ('player-open','second-player') else '返回书架' if name=='settings-open' else '听页'
+    results[name]['validScreen']=expected in labels
+    if expected not in labels:
+        results[name]['invalidReason']='Unexpected screen; do not use these frame timings as a performance result'
+        (out/f'{tag}-summary.json').write_text(json.dumps(results,indent=2));print(json.dumps(results,indent=2));sys.exit(2)
     time.sleep(.4)
 (out/f'{tag}-summary.json').write_text(json.dumps(results,indent=2));print(json.dumps(results,indent=2))

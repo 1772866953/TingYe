@@ -65,12 +65,20 @@ object BackupCodec {
                 put("theme", settings.theme); put("rewind", settings.rewind)
                 put("forward", settings.forward); put("resumeBack", settings.resumeBack)
                 put("intro", settings.intro); put("outro", settings.outro)
-                put("transitionSpeed", settings.transitionSpeed); put("wallpaper", settings.wallpaper)
-                put("wallpaperUri", settings.wallpaperUri); put("wallpaperBlur", settings.wallpaperBlur)
+                put("transitionSpeed", settings.transitionSpeed)
                 put("defaultSpeed", settings.defaultSpeed); put("hapticStrength", settings.hapticStrength)
                 put("headphonePrevious", settings.headphonePrevious); put("headphoneNext", settings.headphoneNext)
                 put("volumeLeveling", settings.volumeLeveling)
                 put("progressUndoSeconds", settings.progressUndoSeconds)
+                put("wallpaperUri",settings.wallpaperUri?:JSONObject.NULL);put("wallpaperBlur",settings.wallpaperBlur)
+                put("glassTransparency",legacyGlassPercent(settings.glass.transparency,70f))
+                put("glassEdgeShadow",legacyGlassPercent(settings.glass.edgeShadow,55f))
+                put("glassRefraction",legacyGlassPercent(settings.glass.refraction,50f))
+                put("glassAdjustment",JSONObject().apply{
+                    put("transparency",settings.glass.normalized().transparency)
+                    put("edgeShadow",settings.glass.normalized().edgeShadow)
+                    put("refraction",settings.glass.normalized().refraction)
+                })
             })
             put("listeningDays", JSONArray().apply { dao.allListeningDays().forEach { day ->
                 put(JSONObject().put("day", day.day).put("durationMs", day.durationMs))
@@ -132,12 +140,17 @@ object BackupCodec {
         val settings = ListeningSettings(s.optString("theme", "system"), s.optInt("rewind", 15),
             s.optInt("forward", 30), s.optInt("resumeBack", 3), s.optInt("intro", 0),
             s.optInt("outro", 0), s.optDouble("transitionSpeed", 1.0).toFloat(),
-            s.optString("wallpaper", "sage"), s.nullableString("wallpaperUri"),
-            s.optDouble("wallpaperBlur", 0.0).toFloat(), s.optDouble("defaultSpeed", 1.0).toFloat(),
+            s.optDouble("defaultSpeed", 1.0).toFloat(),
             s.optInt("hapticStrength", 2).coerceIn(0, 3),
             validHeadphoneAction(s.nullableString("headphonePrevious")),
             validHeadphoneAction(s.nullableString("headphoneNext")), s.optBoolean("volumeLeveling", false),
-            s.optInt("progressUndoSeconds", 12).coerceIn(1, 12))
+            s.optInt("progressUndoSeconds", 12).coerceIn(1, 12),
+            s.nullableString("wallpaperUri")?.takeIf{it.startsWith("content://")},s.optInt("wallpaperBlur",28).coerceIn(0,100),
+            s.optJSONObject("glassAdjustment")?.let{g->GlassAppearance(g.optDouble("transparency",0.0).toFloat(),
+                g.optDouble("edgeShadow",0.0).toFloat(),g.optDouble("refraction",0.0).toFloat()).normalized()}
+                ?:GlassAppearance(legacyGlassAdjustment(s.optDouble("glassTransparency",70.0).toFloat(),70f),
+                    legacyGlassAdjustment(s.optDouble("glassEdgeShadow",55.0).toFloat(),55f),
+                    legacyGlassAdjustment(s.optDouble("glassRefraction",50.0).toFloat(),50f)).normalized())
         val existingNames = database.dao().allBooks().map { it.title.trim().lowercase() }.toSet()
         val conflicts = (0 until books.length()).count {
             books.getJSONObject(it).getString("title").trim().lowercase() in existingNames

@@ -1,0 +1,30 @@
+.glass-button{position:relative;display:inline-flex;align-items:center;justify-content:center;min-height:40px;padding:0;border:0;color:#202d2a;font-size:12px;font-weight:600;white-space:nowrap;background:transparent;isolation:isolate;user-select:none;touch-action:manipulation}
+.glass-material{position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(150deg,#ffffff5c,#ffffff12 52%,#c0cdca38);box-shadow:0 6px 16px #253b3524,0 1px 3px #172c3323,inset 0 1px 2px #ffffffb8,inset 0 -1px 2px #ffffff75;transition:background-color .18s}
+.glass-button:hover>.glass-material{background-color:#ffffff18}
+.glass-button:disabled{opacity:.4}
+.glass-button>.glass-content{position:relative;z-index:2;display:flex;align-items:center;justify-content:center;gap:8px;padding:11px 18px;filter:none;text-shadow:none;transform:none;backdrop-filter:none;-webkit-font-smoothing:antialiased}
+.glass-rim{position:absolute;inset:0;pointer-events:none;border-radius:inherit;padding:1.3px;background:linear-gradient(145deg,#ffffffff 1%,#ffffffc9 22%,#ffffff35 44%,#f6fffce8 75%,#fffffffa 100%);-webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);-webkit-mask-composite:xor;mask-composite:exclude}
+.glass-sheen{position:absolute;inset:2px;border-radius:inherit;box-shadow:inset 0 1px 2px #ffffff3d,inset 0 -1px 2px #3e575b15;background:linear-gradient(170deg,#ffffff18,transparent 38%,#ffffff08 80%);pointer-events:none}
+.glass-lens{transform:translate(-50%,-50%)!important;pointer-events:none!important;border-radius:inherit;transition:none!important}
+.glass-lens .glass{width:100%;height:100%;border-radius:inherit!important;box-shadow:none!important;transition:none!important}
+.glass-lens .glass__warp{border-radius:inherit}
+.glass-lens .glass>div{width:100%;height:100%}
+.glass-panel{background:#fbfdfc72;border:1px solid #ffffffb5;box-shadow:0 15px 36px #304a3b0d;backdrop-filter:blur(22px) saturate(108%)}
+.glass-panel>.glass-content{position:relative}
+.glass-button:focus-visible{outline:2px solid #466f65;outline-offset:4px}
+@media(prefers-reduced-transparency:reduce){.glass-material{background:#f2f6f3}.glass-lens{display:none}}
+.glass-filter-defs{position:absolute;width:0;height:0;pointer-events:none}.glass-refraction{position:absolute;inset:0;border-radius:inherit;overflow:hidden;pointer-events:none}.glass-material{background:linear-gradient(155deg,#ffffff4d,#eef4ef20 50%,#b9c8c02b);box-shadow:0 5px 14px #233a3321,0 1px 2px #243d3510,inset 0 1px 1px #ffffffa0,inset 0 -1px 2px #ffffff75}.glass-button.primary .glass-material,.source-card .glass-material{background:linear-gradient(145deg,#c2cec750,#ffffff2a 54%,#b5c6bb38)}.glass-sheen{background:linear-gradient(175deg,#ffffff17,transparent 40%);box-shadow:inset 0 1px 1px #ffffff4d,inset 0 -1px 1px #334c4e0d}.glass-rim{padding:1.3px;background:linear-gradient(145deg,#fffffffa,#ffffffc9 25%,#ffffff55 48%,#ffffffd1 80%,#ffffffff)}
+
+.glass-highlight{position:absolute;inset:0;border-radius:inherit;pointer-events:none;mix-blend-mode:soft-light}
+.glass-slider{position:relative;height:46px;margin:9px 0 1px;isolation:isolate}
+.glass-slider-track{position:absolute;left:16px;right:16px;top:19px;height:8px;border:1px solid #ffffffb0;border-radius:99px;background:#c4d3cb80;box-shadow:inset 0 1px 3px #233c3520;overflow:hidden;pointer-events:none}
+.glass-slider-track>span{display:block;height:100%;border-radius:inherit;background:linear-gradient(90deg,#8eafa0b0,#719986a0)}
+.glass-slider-travel{position:absolute;left:16px;right:16px;top:7px;height:32px;pointer-events:none}
+.glass-thumb{position:absolute;top:0;width:32px;height:32px;margin-left:-16px;border-radius:50%;pointer-events:none}
+.glass-thumb .glass-material{background:linear-gradient(145deg,#ffffff82,#e2eee342 55%,#b7cbbd61);box-shadow:inset 0 1px 1px #fff,inset 0 -1px 2px #ffffffa0}
+.glass-slider input[type=range]{position:absolute;inset:0;appearance:none;-webkit-appearance:none;width:100%;height:46px;margin:0;padding:0;border:0;background:transparent;cursor:grab;touch-action:none;border-radius:99px}
+.glass-slider input[type=range]:active{cursor:grabbing}
+.glass-slider input[type=range]::-webkit-slider-runnable-track{height:8px;background:transparent;border:0}
+.glass-slider input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:32px;height:32px;margin-top:-12px;border:0;border-radius:50%;background:transparent;box-shadow:none}
+.glass-slider input[type=range]:focus-visible{outline:2px solid #466f65;outline-offset:2px}
+.glass-slider:has(input:disabled){opacity:.4}

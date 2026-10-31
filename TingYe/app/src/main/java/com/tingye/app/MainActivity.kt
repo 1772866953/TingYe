@@ -1,4 +1,5 @@
-@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class,
+    androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 
 package com.tingye.app
 
@@ -27,6 +28,8 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.*
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -35,6 +38,8 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.interaction.collectIsDraggedAsState
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.LazyListState
@@ -57,6 +62,7 @@ import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.luminance
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.graphics.layer.drawLayer
@@ -86,6 +92,7 @@ import androidx.compose.ui.platform.ViewConfiguration
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.nestedscroll.NestedScrollConnection
 import androidx.compose.ui.input.nestedscroll.NestedScrollSource
 import androidx.compose.ui.input.nestedscroll.nestedScroll
@@ -98,6 +105,7 @@ import androidx.compose.ui.input.key.type
 import androidx.compose.ui.input.key.onPreviewKeyEvent
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.setProgress
 import androidx.compose.ui.semantics.progressBarRangeInfo
 import androidx.compose.ui.semantics.ProgressBarRangeInfo
@@ -111,6 +119,7 @@ import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.documentfile.provider.DocumentFile
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.core.view.WindowCompat
@@ -120,6 +129,7 @@ import com.tingye.app.data.Chapter
 import com.tingye.app.data.Bookmark
 import com.tingye.app.data.ListeningSettings
 import com.tingye.app.data.*
+import com.tingye.app.reader.*
 import com.tingye.app.playback.PlaybackService
 import com.tingye.app.playback.TimerUi
 import java.util.concurrent.TimeUnit
@@ -131,6 +141,23 @@ import kotlin.math.roundToInt
 
 class MainActivity : ComponentActivity() {
     private val model by viewModels<MainViewModel>()
+    private val readerModel by viewModels<ReaderViewModel>()
+    private var novelAudioTarget: Long? = null
+    private var subtitleAudioTarget: Long? = null
+    private val novels = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) readerModel.import(uri, novelAudioTarget)
+        novelAudioTarget = null
+    }
+    private val readerFont = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) readerModel.importFont(uri)
+    }
+    private val sentenceSync = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if(uri!=null)readerModel.importSync(uri)
+    }
+    private val subtitles = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) subtitleAudioTarget?.let { readerModel.importSubtitles(uri, it) }
+        subtitleAudioTarget = null
+    }
     private var firstContentReady = false
     private var systemSplashVisible by mutableStateOf(true)
     private var notificationLaunch by mutableIntStateOf(0)
@@ -173,15 +200,10 @@ class MainActivity : ComponentActivity() {
             model.relinkMissing(uri)
         }
     }
-    private val wallpaperPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) {
-            runCatching { contentResolver.takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION) }
-            model.customWallpaper(uri)
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        novelAudioTarget = savedInstanceState?.getLong("novel_audio_target", -1L)?.takeIf { it >= 0 }
+        subtitleAudioTarget = savedInstanceState?.getLong("subtitle_audio_target", -1L)?.takeIf { it >= 0 }
         if (savedInstanceState != null) systemSplashVisible = false
         if (android.os.Build.VERSION.SDK_INT >= 31) {
             splashScreen.setOnExitAnimationListener { splash ->
@@ -221,9 +243,6 @@ class MainActivity : ComponentActivity() {
             }
             val loadedSettings by produceState<ListeningSettings?>(initialValue = null) {
                 model.preferences.values.collect { settings ->
-                    if (settings.wallpaper == "custom") settings.wallpaperUri?.let {
-                        preloadWallpaperImage(this@MainActivity, it)
-                    }
                     value = settings
                 }
             }
@@ -240,11 +259,16 @@ class MainActivity : ComponentActivity() {
             DisposableEffect(haptics) { onDispose { haptics.close() } }
             SideEffect { haptics.strength = settings.hapticStrength }
             val dark = when (settings.theme) { "dark" -> true; "light" -> false; else -> androidx.compose.foundation.isSystemInDarkTheme() }
-            val lightStatusBars = !dark && !systemSplashVisible
-            SideEffect {
+            val activeReading by readerModel.session.collectAsStateWithLifecycle()
+            val readingStyle by readerModel.style.collectAsStateWithLifecycle()
+            val lightStatusBars = if (activeReading != null) readingStyle.theme != "night" else false
+            LaunchedEffect(activeReading?.book?.id,lightStatusBars) {
                 WindowInsetsControllerCompat(window, window.decorView).apply {
                     isAppearanceLightStatusBars = lightStatusBars
                     isAppearanceLightNavigationBars = lightStatusBars
+                    systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                    if(activeReading!=null) hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                    else show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
                 }
                 if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
                     val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
@@ -255,18 +279,23 @@ class MainActivity : ComponentActivity() {
                 }
             }
             TingYeTheme(dark) {
+                GlassEnvironment(dark,settings.wallpaperUri,settings.wallpaperBlur,settings.glass) {
                 CompositionLocalProvider(LocalMotionSpeed provides settings.transitionSpeed,
                     LocalAppHaptics provides haptics, LocalRippleConfiguration provides null) {
                     Box(Modifier.fillMaxSize()) {
                         MainScreen(model, { files.launch(arrayOf("audio/*")) }, { folder.launch(null) },
                             { book -> coverTarget = book; cover.launch(arrayOf("image/*")) },
                             { relink.launch(arrayOf("audio/*")) },
-                            { wallpaperPicker.launch(arrayOf("image/*")) },
                             { backupExport.launch("TingYe-backup.json") },
                             { backupImport.launch(arrayOf("application/json", "*/*")) },
-                            notificationLaunch, settings, { batchFolder.launch(null) })
+                            notificationLaunch, settings, { batchFolder.launch(null) }, readerModel,
+                            { target -> novelAudioTarget = target; novels.launch(arrayOf("text/*", "application/epub+zip", "application/octet-stream")) },
+                            { readerFont.launch(arrayOf("font/*", "application/x-font-ttf", "application/octet-stream")) },
+                            { chapterId -> subtitleAudioTarget = chapterId; subtitles.launch(arrayOf("text/*", "application/x-subrip", "application/octet-stream")) },
+                            { sentenceSync.launch(arrayOf("application/zip", "application/octet-stream", "*/*")) })
                     }
                 }
+            }
             }
             }
         }
@@ -277,19 +306,30 @@ class MainActivity : ComponentActivity() {
         setIntent(intent)
         if (intent.action == PlaybackService.ACTION_OPEN_PLAYER) notificationLaunch++
     }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        outState.putLong("novel_audio_target", novelAudioTarget ?: -1L)
+        outState.putLong("subtitle_audio_target", subtitleAudioTarget ?: -1L)
+        super.onSaveInstanceState(outState)
+    }
 }
 
 private val Ink = Color(0xFF243B34)
 private val Sage = Color(0xFF47685B)
-private val Paper = Color(0xFFF8F5F0)
+private val Paper = Color(0xFFEDF2EF)
 private val Night = Color(0xFF181F1C)
 private val coverColors = listOf(Color(0xFF587269), Color(0xFF876D61), Color(0xFF6C718A), Color(0xFF917C55))
-private val LocalMotionSpeed = compositionLocalOf { 1f }
-private val LocalAppHaptics = staticCompositionLocalOf<AppHaptics> { error("Haptics unavailable") }
+internal val LocalMotionSpeed = compositionLocalOf { 1f }
+internal val LocalAppHaptics = staticCompositionLocalOf<AppHaptics> { error("Haptics unavailable") }
 
 @Composable private fun TingYeTheme(dark: Boolean, content: @Composable () -> Unit) {
-    val colors = if (dark) darkColorScheme(primary = Color(0xFFA9C9B8), onPrimary = Color(0xFF173B30), primaryContainer = Color(0xFF345648), onPrimaryContainer = Color(0xFFE1F2E7), secondary = Color(0xFFACC7B8), onSecondary = Color(0xFF193B30), secondaryContainer = Color(0xFF345648), onSecondaryContainer = Color(0xFFE1F2E7), background = Night, surface = Color(0xFF26312B), onBackground = Color(0xFFE9EEE9), onSurface = Color(0xFFE9EEE9))
-    else lightColorScheme(primary = Sage, onPrimary = Color.White, primaryContainer = Color(0xFFDDEBE2), onPrimaryContainer = Ink, secondary = Sage, onSecondary = Color.White, secondaryContainer = Color(0xFFE5ECE6), onSecondaryContainer = Ink, background = Paper, surface = Color.White, onBackground = Ink, onSurface = Ink)
+    val base=if(dark)Color(0xFF111C27)else Color(0xFF1D303C)
+    val ink=Color(0xFFF3F6FA);val muted=Color(0xFFC4CDDA);val accent=Color(0xFFD6E4FA)
+    val colors=darkColorScheme(primary=accent,onPrimary=Color(0xFF263448),primaryContainer=Color(0xFF72839A),onPrimaryContainer=ink,
+        secondary=accent,onSecondary=Color(0xFF263448),secondaryContainer=Color(0xFF586A80),onSecondaryContainer=ink,
+        background=base,surface=base,onBackground=ink,onSurface=ink,onSurfaceVariant=muted,
+        surfaceContainer=base,surfaceContainerHigh=base,surfaceContainerHighest=Color(0xFF65748A),surfaceTint=Color.Transparent,
+        outline=Color(0xFFADBACB),outlineVariant=Color(0xFF8B9BB0))
     MaterialTheme(colorScheme = colors, typography = Typography()) {
         CompositionLocalProvider(LocalContentColor provides colors.onBackground, content = content)
     }
@@ -312,7 +352,7 @@ private object Motion {
     // shared element that can leave a visible 10–20 px jump at the handoff.
     fun container(speed: Float) = spring<Float>(dampingRatio = containerDamping,
         stiffness = containerStiffness * speed * speed, visibilityThreshold = 0.0001f)
-    fun press(speed: Float) = spring<Float>(dampingRatio = 0.9f, stiffness = 900f * speed * speed)
+    fun press(speed: Float) = spring<Float>(dampingRatio = 0.78f, stiffness = 360f * speed * speed)
     fun duration(baseMs: Int, speed: Float) = (baseMs / speed).roundToInt().coerceAtLeast(1)
     val smallCurve = CubicBezierEasing(0.2f, 0f, 0f, 1f)
     fun fade(from: Float, to: Float, progress: Float): Float {
@@ -322,7 +362,7 @@ private object Motion {
 }
 
 @Composable private fun pressLayer(modifier: Modifier, interaction: MutableInteractionSource,
-    pressedScale: Float = 0.91f, reboundDamping: Float = 0.72f): Modifier {
+    pressedScale: Float = 0.91f, reboundDamping: Float = 0.72f, captureDrag:Boolean=true): Modifier {
     val speed = LocalMotionSpeed.current
     if (pressedScale >= 0.98f) {
         val pressed by interaction.collectIsPressedAsState()
@@ -330,82 +370,81 @@ private object Motion {
             Motion.press(speed), label = "卡片按压")
         return modifier.graphicsLayer { scaleX = scale; scaleY = scale }
     }
-    val scale = remember(interaction) { Animatable(1f) }
-    LaunchedEffect(interaction, speed, pressedScale, reboundDamping) {
-        var startedAt = 0L
-        interaction.interactions.collectLatest { event ->
-            when (event) {
-                is PressInteraction.Press -> {
-                    startedAt = android.os.SystemClock.uptimeMillis()
-                    // A quick tap must have a visible contact frame, too.
-                    scale.snapTo(minOf(scale.value, 0.95f))
-                    scale.animateTo(pressedScale, tween(Motion.duration(45, speed)))
-                }
-                is PressInteraction.Release -> {
-                    if (scale.value > pressedScale + 0.005f)
-                        scale.animateTo(pressedScale, tween(Motion.duration(25, speed)))
-                    val remaining = Motion.duration(85, speed) - (android.os.SystemClock.uptimeMillis() - startedAt)
-                    if (remaining > 0) delay(remaining)
-                    scale.animateTo(1f, spring(dampingRatio = reboundDamping, stiffness = 650f * speed * speed,
-                        visibilityThreshold = 0.0001f))
-                }
-                is PressInteraction.Cancel -> scale.animateTo(1f, Motion.press(speed))
-            }
-        }
-    }
-    return modifier.graphicsLayer {
-        scaleX = scale.value; scaleY = scale.value
-    }
+    return liquidPress(modifier,interaction,pressedScale,reboundDamping,speed,captureDrag=captureDrag)
 }
 
-@Composable private fun MotionTextButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
-    content: @Composable RowScope.() -> Unit) {
+@Composable internal fun MotionTextButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
+    compact:Boolean=false,plain:Boolean=false,captureDrag:Boolean=false,
+    contentPadding:PaddingValues=PaddingValues(horizontal=14.dp,vertical=8.dp),content: @Composable RowScope.() -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val haptics = LocalAppHaptics.current
-    TextButton(onClick = { haptics.click(onClick) }, modifier = pressLayer(modifier, interaction),
+    TextButton(onClick = { if(acceptLiquidClick(interaction)) haptics.click(onClick) }, modifier = pressLayer(modifier, interaction,captureDrag=captureDrag).then(if(plain)Modifier else Modifier.liquidGlass(14.dp,1.dp,verticalInset=if(compact)4.dp else 0.dp,interaction=interaction)),
+        shape=RoundedCornerShape(14.dp), contentPadding=contentPadding,
         enabled = enabled, interactionSource = interaction, content = content)
 }
 
-@Composable private fun MotionFilledTonalButton(onClick: () -> Unit, modifier: Modifier = Modifier,
+@Composable internal fun MotionFilledTonalButton(onClick: () -> Unit, modifier: Modifier = Modifier,
     content: @Composable RowScope.() -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val haptics = LocalAppHaptics.current
-    FilledTonalButton(onClick = { haptics.click(onClick) }, modifier = pressLayer(modifier, interaction),
-        interactionSource = interaction, content = content)
+    FilledTonalButton(onClick = { if(acceptLiquidClick(interaction)) haptics.click(onClick) }, modifier = pressLayer(modifier.heightIn(min=48.dp), interaction,captureDrag=false).liquidGlass(16.dp,2.dp,interaction=interaction),
+        shape=RoundedCornerShape(16.dp),contentPadding=PaddingValues(horizontal=18.dp,vertical=12.dp),
+        colors=ButtonDefaults.filledTonalButtonColors(containerColor=Color.Transparent), interactionSource = interaction, content = content)
 }
 
-@Composable private fun MotionButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
+@Composable internal fun MotionButton(onClick: () -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true,
     content: @Composable RowScope.() -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val haptics = LocalAppHaptics.current
-    Button(onClick = { haptics.click(onClick) }, enabled = enabled, modifier = pressLayer(modifier, interaction),
-        interactionSource = interaction, content = content)
+    Button(onClick = { if(acceptLiquidClick(interaction)) haptics.click(onClick) }, enabled = enabled, modifier = pressLayer(modifier.heightIn(min=48.dp), interaction,captureDrag=false).liquidGlass(16.dp,2.dp,interaction=interaction),
+        shape=RoundedCornerShape(16.dp),contentPadding=PaddingValues(horizontal=18.dp,vertical=12.dp),
+        colors=ButtonDefaults.buttonColors(containerColor=Color.Transparent,contentColor=MaterialTheme.colorScheme.primary), interactionSource = interaction, content = content)
 }
 
-@Composable private fun MotionFilterChip(selected: Boolean, onClick: () -> Unit,
+@Composable internal fun MotionFilterChip(selected: Boolean, onClick: () -> Unit,
     label: @Composable () -> Unit, modifier: Modifier = Modifier) {
-    val interaction = remember { MutableInteractionSource() }
-    val haptics = LocalAppHaptics.current
-    FilterChip(selected = selected, onClick = { haptics.click(onClick) }, label = label,
-        modifier = pressLayer(modifier, interaction), interactionSource = interaction)
+    GlassChoice(selected,onClick,modifier){
+        ProvideTextStyle(MaterialTheme.typography.labelLarge.copy(lineBreak=androidx.compose.ui.text.style.LineBreak.Simple)) { label() }
+    }
 }
 
 private fun blend(a: Float, b: Float, t: Float) = a + (b - a) * t
 
-/** Keep the native track, keyboard and accessibility behavior, with immediate
- * horizontal dragging and continuous finger tracking even for discrete values. */
-@Composable private fun AppSlider(value: Float, onValueChange: (Float) -> Unit,
+/** Native slider semantics/keyboard, with direction-aware touch arbitration.
+ * Preview at contact immediately; vertical gestures belong to menu scrolling
+ * and must never commit a tap/seek/settings change. */
+@Composable internal fun AppSlider(value: Float, onValueChange: (Float) -> Unit,
     modifier: Modifier = Modifier, enabled: Boolean = true,
     valueRange: ClosedFloatingPointRange<Float> = 0f..1f, steps: Int = 0,
-    onValueChangeFinished: (() -> Unit)? = null) {
-    val configuration = LocalViewConfiguration.current
-    val directTouch = remember(configuration) {
-        object : ViewConfiguration by configuration { override val touchSlop = 0f }
-    }
+    onValueChangeFinished: (() -> Unit)? = null, onValueChangeCancelled: (() -> Unit)? = null) {
+    val trackBackdrop=rememberLiveGlassBackdrop()
+    val pull=remember{mutableStateOf(Offset.Zero)}
     val interaction = remember { MutableInteractionSource() }
     val dragging by interaction.collectIsDraggedAsState()
+    var touching by remember { mutableStateOf(false) }
     var draft by remember(valueRange) { mutableFloatStateOf(value) }
-    SideEffect { if (!dragging) draft = value }
+    val latestValue by rememberUpdatedState(value)
+    val latestChange by rememberUpdatedState(onValueChange)
+    val latestFinish by rememberUpdatedState(onValueChangeFinished)
+    val latestCancel by rememberUpdatedState(onValueChangeCancelled)
+    val density=LocalDensity.current.density
+    val rtl=androidx.compose.ui.platform.LocalLayoutDirection.current==androidx.compose.ui.unit.LayoutDirection.Rtl
+    val dragResponse=remember(density){GlassThumbDrag(density)}
+    val dragFrame=remember{longArrayOf(0L)}
+    var fingerPoint by remember{mutableStateOf(Offset.Zero)}
+    var overpull by remember{mutableStateOf(Offset.Zero)}
+    LaunchedEffect(touching,fingerPoint,overpull){
+        if(!touching){pull.value=Offset.Zero;return@LaunchedEffect}
+        var moving=true
+        while(moving)withFrameNanos{now->
+            val dt=if(dragFrame[0]==0L)1f/120f else (now-dragFrame[0])/1_000_000_000f
+            dragFrame[0]=now
+            moving=dragResponse.step(fingerPoint.x,dt)
+            pull.value=Offset(dragResponse.force+overpull.x,overpull.y)
+        }
+    }
+    val focus=remember{FocusRequester()}
+    SideEffect { if (!touching && !dragging) draft = value }
     fun snap(target: Float): Float = if (steps > 0) {
             val interval = (valueRange.endInclusive - valueRange.start) / (steps + 1)
             (valueRange.start + ((target - valueRange.start) / interval).roundToInt() * interval)
@@ -414,12 +453,12 @@ private fun blend(a: Float, b: Float, t: Float) = a + (b - a) * t
     fun finish() {
         val committed = snap(draft)
         draft = committed
-        onValueChange(committed)
-        onValueChangeFinished?.invoke()
+        latestChange(committed)
+        latestFinish?.invoke()
     }
-    CompositionLocalProvider(LocalViewConfiguration provides directTouch) {
-        Slider(value = draft, onValueChange = { draft = it; onValueChange(it) },
-            modifier = modifier.semantics {
+    Box(modifier.fillMaxWidth()) {
+        Slider(value = draft, onValueChange = { draft = it; latestChange(it) },
+            modifier = Modifier.fillMaxWidth().focusRequester(focus).semantics {
                 progressBarRangeInfo = ProgressBarRangeInfo(draft, valueRange, steps)
                 setProgress { target ->
                     if (!enabled) false else { draft = target; finish(); true }
@@ -440,15 +479,85 @@ private fun blend(a: Float, b: Float, t: Float) = a + (b - a) * t
                     }
                 }
             }, enabled = enabled, valueRange = valueRange, steps = 0,
-            onValueChangeFinished = ::finish, interactionSource = interaction)
+            onValueChangeFinished = ::finish, interactionSource = interaction,
+            thumb = { GlassSliderThumb(interaction,enabled,trackBackdrop,pull) },
+            track = { state -> GlassSliderTrack((state.value-valueRange.start)/(valueRange.endInclusive-valueRange.start).coerceAtLeast(.001f),enabled,Modifier.recordGlassBackdrop(trackBackdrop)) })
+        // A sibling hit surface keeps the native zero-slop horizontal detector
+        // from stealing a vertical scroll. No extra accessibility node is added.
+        Box(Modifier.matchParentSize().pointerInput(enabled,valueRange,steps,density,rtl,interaction){
+            awaitEachGesture{
+                val down=awaitFirstDown(requireUnconsumed=true)
+                if(!enabled)return@awaitEachGesture
+                touching=true;focus.requestFocus()
+                dragResponse.reset(down.position.x);dragFrame[0]=0L;fingerPoint=down.position
+                val initialValue=latestValue
+                val press=PressInteraction.Press(down.position)
+                interaction.tryEmit(press)
+                var drag:androidx.compose.foundation.interaction.DragInteraction.Start?=null
+                var vertical=false;var completed=false;var pressEnded=false;var changed=false
+                val radius=15f*density
+                fun valueAt(x:Float):Float{
+                    val fraction=((x-radius)/(size.width-2*radius).coerceAtLeast(1f)).coerceIn(0f,1f)
+                    return valueRange.start+(if(rtl)1f-fraction else fraction)*(valueRange.endInclusive-valueRange.start)
+                }
+                fun preview(position:Offset){
+                    draft=valueAt(position.x)
+                    fingerPoint=position
+                    overpull=Offset(position.x-position.x.coerceIn(radius,(size.width-radius).coerceAtLeast(radius)),position.y-size.height/2)
+                }
+                preview(down.position)
+                try{
+                    while(true){
+                        val event=awaitPointerEvent()
+                        val change=event.changes.firstOrNull{it.id==down.id}?:break
+                        val delta=change.position-down.position
+                        if(!vertical && change.isConsumed){
+                            vertical=true;draft=latestValue;overpull=Offset.Zero;touching=false;pull.value=Offset.Zero
+                        }
+                        if(!vertical && drag==null && delta.getDistance()>2f*density){
+                            if(kotlin.math.abs(delta.y)>kotlin.math.abs(delta.x)){
+                                vertical=true;draft=latestValue;overpull=Offset.Zero;touching=false;pull.value=Offset.Zero
+                            }else{
+                                drag=androidx.compose.foundation.interaction.DragInteraction.Start()
+                                interaction.tryEmit(drag!!)
+                            }
+                        }
+                        if(vertical && !pressEnded){
+                            interaction.tryEmit(PressInteraction.Cancel(press));pressEnded=true
+                        }
+                        if(!change.pressed){
+                            if(!vertical){
+                                preview(change.position);finish();change.consume()
+                                interaction.tryEmit(PressInteraction.Release(press));pressEnded=true
+                                drag?.let{interaction.tryEmit(androidx.compose.foundation.interaction.DragInteraction.Stop(it))}
+                                completed=true
+                            }
+                            break
+                        }
+                        if(!vertical){
+                            preview(change.position)
+                            if(drag!=null){latestChange(draft);changed=true;change.consume()}
+                        }
+                    }
+                }finally{
+                    if(!completed){
+                        if(changed){latestChange(initialValue);latestCancel?.invoke()}
+                        draft=if(changed)initialValue else latestValue
+                        if(!pressEnded)interaction.tryEmit(PressInteraction.Cancel(press))
+                        drag?.let{interaction.tryEmit(androidx.compose.foundation.interaction.DragInteraction.Cancel(it))}
+                    }
+                    pull.value=Offset.Zero;touching=false
+                }
+            }
+        })
     }
 }
 
-@Composable private fun MotionIconButton(onClick: () -> Unit, modifier: Modifier = Modifier,
-    enabled: Boolean = true, content: @Composable () -> Unit) {
+@Composable internal fun MotionIconButton(onClick: () -> Unit, modifier: Modifier = Modifier,
+    enabled: Boolean = true, glassOutput:LiveGlassBackdrop?=null,plain:Boolean=false, content: @Composable () -> Unit) {
     val interaction = remember { MutableInteractionSource() }
     val haptics = LocalAppHaptics.current
-    IconButton(onClick = { haptics.click(onClick) }, modifier = pressLayer(modifier, interaction),
+    IconButton(onClick = { if(acceptLiquidClick(interaction)) haptics.click(onClick) }, modifier = pressLayer(modifier, interaction).then(if(plain)Modifier else Modifier.liquidGlass(99.dp,verticalInset=4.dp,horizontalInset=4.dp,interaction=interaction,exported=glassOutput)),
         enabled = enabled, interactionSource = interaction, content = content)
 }
 
@@ -465,8 +574,8 @@ private fun blend(a: Float, b: Float, t: Float) = a + (b - a) * t
     interactionSource: MutableInteractionSource? = null) {
     val interaction = interactionSource ?: remember { MutableInteractionSource() }
     val haptics = LocalAppHaptics.current
-    DropdownMenuItem(text = text, onClick = { haptics.click(onClick) }, leadingIcon = leadingIcon,
-        modifier = pressLayer(modifier, interaction), interactionSource = interaction)
+    DropdownMenuItem(text = text, onClick = { if(acceptLiquidClick(interaction))haptics.click(onClick) }, leadingIcon = leadingIcon,
+        modifier = pressLayer(modifier, interaction,captureDrag=false), interactionSource = interaction)
 }
 
 /** At the bottom, upward overscroll belongs to the content, not the sheet's spring. */
@@ -476,26 +585,13 @@ private val sheetEndBoundary = object : NestedScrollConnection {
     override suspend fun onPostFling(consumed: Velocity, available: Velocity): Velocity =
         if (available.y < 0f) Velocity(0f, available.y) else Velocity.Zero
 }
-private fun Modifier.sheetScroll(state: ScrollState): Modifier =
+internal fun Modifier.sheetScroll(state: ScrollState): Modifier =
     nestedScroll(sheetEndBoundary).verticalScroll(state, overscrollEffect = null)
 
 /** All submenus open fully and finish their exit animation before being removed. */
-private typealias SheetDismiss = (() -> Unit) -> Unit
-@Composable private fun AppSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.(dismiss: SheetDismiss) -> Unit) {
-    val state = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val scope = rememberCoroutineScope()
-    var dismissing by remember { mutableStateOf(false) }
-    val dismiss: SheetDismiss = { after ->
-        if (!dismissing) { dismissing = true; scope.launch { state.hide(); onDismiss(); after() } }
-        Unit
-    }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state,
-        containerColor = MaterialTheme.colorScheme.background,
-        shape = RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp),
-        scrimColor = Color.Black.copy(alpha = 0.28f)) {
-        Column(Modifier.fillMaxWidth().heightIn(max = (LocalConfiguration.current.screenHeightDp * 0.86f).dp)
-            .padding(bottom = 16.dp)) { content(dismiss) }
-    }
+internal typealias SheetDismiss = (() -> Unit) -> Unit
+@Composable internal fun AppSheet(onDismiss: () -> Unit, content: @Composable ColumnScope.(dismiss: SheetDismiss) -> Unit) {
+    GlassSheet(onDismiss,content=content)
 }
 
 private fun remainingLabel(value: RemainingListening): String {
@@ -581,13 +677,24 @@ private class PlayerVisual(
 }
 
 @Composable private fun MainScreen(vm: MainViewModel, pickFiles: () -> Unit, pickFolder: () -> Unit,
-    pickCover: (Book) -> Unit, relink: () -> Unit, pickWallpaper: () -> Unit,
+    pickCover: (Book) -> Unit, relink: () -> Unit,
     exportBackup: () -> Unit, importBackup: () -> Unit,
-    notificationLaunch: Int, settings: ListeningSettings, pickBatchFolder: () -> Unit) {
+    notificationLaunch: Int, settings: ListeningSettings, pickBatchFolder: () -> Unit,
+    readerVm: ReaderViewModel, pickNovel: (Long?) -> Unit, pickReaderFont: () -> Unit, pickSubtitles: (Long) -> Unit, pickSentenceSync: () -> Unit) {
     val motionSpeed = LocalMotionSpeed.current
     val haptics = LocalAppHaptics.current
     val movingTextMeasurer = rememberTextMeasurer(cacheSize = 32)
     val books by vm.books.collectAsStateWithLifecycle()
+    val readingBooks by readerVm.books.collectAsStateWithLifecycle()
+    val readingSession by readerVm.session.collectAsStateWithLifecycle()
+    val readingBusy by readerVm.busy.collectAsStateWithLifecycle()
+    val readingMessage by readerVm.message.collectAsStateWithLifecycle()
+    SideEffect { readerVm.onAudioSync = { id, target ->
+        vm.playBook(id, target.index, autoplay = false, exactPositionMs = target.positionMs)
+    } }
+    LaunchedEffect(readerVm,vm) { readerVm.bindPlayback(vm.playerUi) }
+    var readingLibraryOpen by remember { mutableStateOf(false) }
+    var readingAudioTarget by remember { mutableStateOf<Long?>(null) }
     val selected by vm.selected.collectAsStateWithLifecycle()
     val chapters by vm.chapters.collectAsStateWithLifecycle()
     val playbackChapters by vm.playbackChapters.collectAsStateWithLifecycle()
@@ -627,6 +734,9 @@ private class PlayerVisual(
     var rootSize by remember { mutableStateOf(IntSize.Zero) }
     var dragProgress by remember { mutableFloatStateOf(Float.NaN) }
     val anchors = remember { mutableStateMapOf<String, Rect>() }
+    val actionMaterials = remember { mutableMapOf<String, LiveGlassBackdrop>() }
+    val miniMaterial=rememberLiveGlassBackdrop()
+    val miniActionMaterial=rememberLiveGlassBackdrop()
     val motion = remember { Animatable(if (playerOpen) 1f else 0f) }
     val scope = rememberCoroutineScope()
     val snackbarHost = remember { SnackbarHostState() }
@@ -634,6 +744,11 @@ private class PlayerVisual(
     var editing by remember { mutableStateOf<Book?>(null) }
     var deleting by remember { mutableStateOf<Book?>(null) }
     var bookSettings by remember { mutableStateOf<Book?>(null) }
+    LaunchedEffect(readingSession?.book?.id) {
+        if (readingSession != null) {
+            vm.pauseForReading(); readingLibraryOpen = false; chaptersOpen = false; bookSettings = null
+        }
+    }
     val book = books.firstOrNull { it.id == selected }
     val coverLift = animateFloatAsState(if (player.isPlaying && player.bookId == book?.id) 1f else 0f,
         spring(dampingRatio = 0.88f, stiffness = 210f * motionSpeed * motionSpeed,
@@ -747,10 +862,9 @@ private class PlayerVisual(
         }
     }
     BackHandler(enabled = !overlayActive && settingsActive) { page = Page.SHELF }
-    Box(Modifier.fillMaxSize().onGloballyPositioned { rootSize = it.size }) {
-    WallpaperSurface(settings.wallpaper, settings.wallpaperUri, Modifier.fillMaxSize(),
-        scrim = MaterialTheme.colorScheme.background, scrimAlpha = if (settings.theme == "dark") 0.72f else 0.78f,
-        blurRadius = settings.wallpaperBlur)
+    Box(Modifier.fillMaxSize().glassSceneSource().onGloballyPositioned { rootSize = it.size }
+        .then(if (readingSession != null) Modifier.clearAndSetSemantics { } else Modifier)) {
+    GlassPageBackground(Modifier.fillMaxSize().glassBackgroundSource())
     Scaffold(
         modifier = (if (overlayActive || page == Page.SETTINGS) Modifier.clearAndSetSemantics { } else Modifier)
             .graphicsLayer {
@@ -760,9 +874,12 @@ private class PlayerVisual(
         containerColor = Color.Transparent,
         snackbarHost = { SnackbarHost(snackbarHost) },
         topBar = {
-            Row(Modifier.fillMaxWidth()
-                .statusBarsPadding().padding(horizontal = 18.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            ShelfGlass { GlassPanel(Modifier.fillMaxWidth(),header=true) { Row(Modifier.fillMaxWidth()
+                .statusBarsPadding().padding(horizontal = 18.dp, vertical = 10.dp), horizontalArrangement=Arrangement.spacedBy(6.dp),verticalAlignment = Alignment.CenterVertically) {
                 Text("听页", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                    MotionIconButton(onClick = { readingAudioTarget = null; readingLibraryOpen = true }) {
+                        Icon(Icons.AutoMirrored.Filled.MenuBook, "小说阅读")
+                    }
                     MotionIconButton(onClick = { importMenuOpen = false; settingsActive = true; page = Page.SETTINGS }) {
                         Icon(Icons.Default.Settings, "设置")
                     }
@@ -770,8 +887,11 @@ private class PlayerVisual(
                         MotionIconButton(onClick = { importMenuOpen = true }) {
                             Icon(Icons.Default.MoreVert, "更多导入方式")
                         }
-                        DropdownMenu(expanded = importMenuOpen, onDismissRequest = { importMenuOpen = false },
-                            modifier = Modifier.clip(RoundedCornerShape(16.dp))) {
+                        GlassMenu(expanded = importMenuOpen, onDismissRequest = { importMenuOpen = false },
+                            modifier = Modifier) {
+                            MotionMenuItem(text = { Text("导入小说 · TXT / EPUB") },
+                                leadingIcon = { Icon(Icons.AutoMirrored.Filled.MenuBook, null) },
+                                onClick = { importMenuOpen = false; pickNovel(null) })
                             MotionMenuItem(text = { Text("选择音频") },
                                 leadingIcon = { Icon(Icons.Default.AudioFile, null) },
                                 onClick = { importMenuOpen = false; pickFiles() })
@@ -783,21 +903,24 @@ private class PlayerVisual(
                                 onClick = { importMenuOpen = false; pickFolder() })
                         }
                     }
-            }
+            } } }
         },
         bottomBar = {
+            ShelfGlass {
             if (player.bookId != null) {
                 val playingBook = books.firstOrNull { it.id == player.bookId }
                 val key = "mini:${player.bookId}"
                 val miniInteraction = remember(key) { MutableInteractionSource() }
+                DisposableEffect(key){actionMaterials[key]=miniActionMaterial;onDispose{actionMaterials.remove(key)}}
                 DisposableEffect(key) { onDispose { listOf("", ":cover", ":title", ":subtitle", ":action").forEach { anchors.remove("$key$it") } } }
                 Box(Modifier.fillMaxWidth().navigationBarsPadding().padding(horizontal = 12.dp, vertical = 8.dp)) {
                 Row(pressLayer(Modifier.fillMaxWidth(), miniInteraction, 0.985f)
                     .onGloballyPositioned { anchors[key] = it.boundsInRoot() }
                     .graphicsLayer { alpha = if (overlayActive && visibleSourceKey == key && progress() > 0f) 0f else 1f }
-                    .clip(RoundedCornerShape(20.dp)).background(MaterialTheme.colorScheme.surface)
+                    .liquidGlass(20.dp,3.dp,panel=true,exported=miniMaterial).clip(RoundedCornerShape(20.dp))
                     .clickable(interactionSource = miniInteraction, indication = null) { playingBook?.let { openPlayer(it.id, key, false) } }
                     .padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
+                    CompositionLocalProvider(LocalGlassBackdrop provides GlassSource(listOf(miniMaterial))){
                     BookCover(playingBook?.title ?: "听页", 48, playingBook?.coverUri, Modifier.onGloballyPositioned { anchors["$key:cover"] = it.boundsInRoot() })
                     Spacer(Modifier.width(12.dp))
                     Column(Modifier.weight(1f)) {
@@ -806,25 +929,26 @@ private class PlayerVisual(
                         Text(playbackChapters.getOrNull(player.index)?.title ?: "点击打开播放器", style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.onGloballyPositioned { anchors["$key:subtitle"] = it.boundsInRoot() })
                     }
-                    MotionIconButton(onClick = { haptics.action(); vm.toggle() }, modifier = Modifier.onGloballyPositioned {
+                    MotionIconButton(onClick = { haptics.action(); vm.toggle() }, glassOutput=miniActionMaterial, modifier = Modifier.onGloballyPositioned {
                         anchors["$key:action"] = it.boundsInRoot()
                     }) { AnimatedPlayIcon(player.isPlaying) }
+                    }
                 }
                 }
-            }
+            } }
         }
     ) { padding ->
-        Box(Modifier.padding(padding)) {
+        Box(Modifier.fillMaxSize().glassShelfSource()) {
                 Shelf(books, player.bookId, chapterCounts, importing.busy, importing.found,
                     vm::cancelImport, anchors, if (overlayActive) visibleSourceKey else null, progress,
                     onOpen = { openPlayer(it.id, "book:${it.id}", false) },
                     onPlay = { openPlayer(it.id, "continue:${it.id}", true) },
-                    onEdit = { bookSettings = it }, onDelete = { deleting = it }, interactive = !overlayActive && page != Page.SETTINGS)
+                    onEdit = { bookSettings = it }, onDelete = { deleting = it }, interactive = !overlayActive && page != Page.SETTINGS, contentInsets=padding,actionMaterials=actionMaterials)
         }
     }
     if (rootSize != IntSize.Zero) {
         SettingsSlideTransition(settingsMotion, rootSize, page == Page.SETTINGS, settingsActive,
-            settings, vm, pickWallpaper, exportBackup, importBackup,
+            settings, vm, exportBackup, importBackup,
             onClose = { haptics.selection(); page = Page.SHELF })
     }
     // Keep the measured player composition for this Activity, without placing hidden nodes.
@@ -852,7 +976,10 @@ private class PlayerVisual(
         val sharedClip = activeSource?.viewport?.let { blend(it, full, travel) } ?: full
         val frame = if (source != null) blend(source, full, travel) else full
         val coverStart = activeSource?.cover
-        val coverEnd = activeTarget?.cover ?: targetCover ?: Rect(full.width / 2f - 90f, 110f, full.width / 2f + 90f, 290f)
+        // Frozen anchors belong to the shared transition only. At rest, the live
+        // placeholder owns the cover position after any inset or window change.
+        val coverEnd = (if(p>=1f && !playerGestureActive) targetCover ?: activeTarget?.cover
+            else activeTarget?.cover ?: targetCover) ?: Rect(full.width / 2f - 90f, 110f, full.width / 2f + 90f, 290f)
         val coverFrame = if (coverStart != null) blend(coverStart, coverEnd, travel) else coverEnd
         val sourceTitle = activeSource?.title
         val sourceSubtitle = activeSource?.subtitle
@@ -882,31 +1009,23 @@ private class PlayerVisual(
             awaitPointerEventScope { while (true) awaitPointerEvent() }
         }) {
             if (source != null) Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.12f * p)))
-            val originColor = when {
-                sourceKey?.startsWith("continue:") == true -> MaterialTheme.colorScheme.primary
-                source != null -> MaterialTheme.colorScheme.surface
-                else -> MaterialTheme.colorScheme.background
-            }
             val initialCornerDp = when {
                 sourceKey?.startsWith("continue:") == true -> 24f
                 sourceKey?.startsWith("book:") == true -> 18f
                 sourceKey?.startsWith("mini:") == true -> 20f
                 else -> 0f
             }
-            val destinationColor = MaterialTheme.colorScheme.background
             // Draw in root pixels: non-uniform scaling flattened the vertical
             // radius and made a rounded card appear rectangular on return.
-            Box(Modifier.fillMaxSize().drawBehind {
-                val radius = with(density) { initialCornerDp.dp.toPx() } * (1f - travel)
-                drawRoundRect(
-                    color = lerp(originColor, destinationColor, travel).copy(alpha = overlayAlpha),
-                    topLeft = Offset(frame.left, frame.top),
-                    size = Size(frame.width, frame.height),
-                    cornerRadius = CornerRadius(radius, radius)
-                )
-            })
+            GlassTransitionSurface(frame,with(density) { initialCornerDp.dp.toPx() }*(1f-travel),overlayAlpha,1f-travel,
+                if(sourceKey?.startsWith("mini:")==true)miniMaterial else null)
             Box((if (chaptersOpen) Modifier.clearAndSetSemantics { } else Modifier).fillMaxSize()) {
                     PlayerSurface(book, bookChapters, player, settings.rewind, settings.forward, vm,
+                        readNovel = {
+                            val linked=readingBooks.firstOrNull { it.audioBookId==book.id }
+                            if(linked!=null) { vm.pauseForReading(); readerVm.open(linked.id,player) }
+                            else { readingAudioTarget=book.id;readingLibraryOpen=true }
+                        },
                         onBack = ::closePlayer, openChapters = { haptics.selection(); chaptersOpen = true }, pickCover = pickCover,
                         edit = { bookSettings = it }, onPlaybackAction = { haptics.action() }, onCover = { targetCover = it },
                         onTextLayout = { part, rect -> anchors["player:$part"] = rect },
@@ -934,9 +1053,9 @@ private class PlayerVisual(
                         sourceKey?.startsWith("book:") == true -> MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.SemiBold)
                          else -> MaterialTheme.typography.bodyLarge.copy(fontWeight = FontWeight.SemiBold)
                     }, MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.SemiBold),
-                    if (sourceKey?.startsWith("continue:") == true) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurface,
+                    MaterialTheme.colorScheme.onSurface,
                     MaterialTheme.colorScheme.onBackground, density, full.width, movingTextAlpha,
-                    sourceMaxLines = if (sourceKey?.startsWith("book:") == true) 2 else 1, measurer = movingTextMeasurer)
+                    sourceMaxLines = 1, measurer = movingTextMeasurer)
             }
             if (subtitleHandoff) {
                 val activeIndex = if (player.bookId == book.id) player.index else book.chapterIndex
@@ -948,17 +1067,17 @@ private class PlayerVisual(
                 }
                 MovingText(sourceLabel, sourceSubtitle!!, targetSubtitle!!, travel,
                     when {
-                        sourceKey?.startsWith("continue:") == true -> MaterialTheme.typography.labelLarge
-                        sourceKey?.startsWith("book:") == true -> MaterialTheme.typography.bodyLarge
+                        sourceKey?.startsWith("continue:") == true -> MaterialTheme.typography.bodySmall
+                        sourceKey?.startsWith("book:") == true -> MaterialTheme.typography.bodySmall
                         else -> MaterialTheme.typography.bodySmall
                     }, MaterialTheme.typography.titleMedium,
                     when {
-                        sourceKey?.startsWith("continue:") == true -> MaterialTheme.colorScheme.onPrimary
-                        sourceKey?.startsWith("book:") == true -> MaterialTheme.colorScheme.primary
+                        sourceKey?.startsWith("continue:") == true -> MaterialTheme.colorScheme.onSurface
+                        sourceKey?.startsWith("book:") == true -> MaterialTheme.colorScheme.onSurfaceVariant
                         else -> MaterialTheme.colorScheme.onSurface
                     },
                     MaterialTheme.colorScheme.primary, density, full.width, movingTextAlpha,
-                    targetText = chapterTitle, sourceMaxLines = 2, measurer = movingTextMeasurer)
+                    targetText = chapterTitle, sourceMaxLines = 1, measurer = movingTextMeasurer)
             }
             // The cover is the foreground plane when text paths briefly overlap.
             Box((if (chaptersOpen) Modifier.clearAndSetSemantics { } else Modifier)
@@ -992,7 +1111,7 @@ private class PlayerVisual(
                     .graphicsLayer {
                         translationX = action.left; translationY = action.top
                         alpha = overlayAlpha * (1f - Motion.fade(0f, 0.12f, p))
-                    }, contentAlignment = Alignment.Center) {
+                    }.drawWithContent{actionMaterials[sourceKey]?.let{drawLayer(it.layer)};drawContent()}, contentAlignment = Alignment.Center) {
                     if (sourceKey.startsWith("mini:"))
                         Icon(if (player.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
                             null, tint = MaterialTheme.colorScheme.onSurface)
@@ -1015,7 +1134,7 @@ private class PlayerVisual(
         val displayed = remember { mutableStateOf(progressUndo) }
         progressUndo?.let { displayed.value = it }
         displayed.value?.let { restore ->
-            Surface(shape = RoundedCornerShape(20.dp), tonalElevation = 6.dp, shadowElevation = 4.dp) {
+            Surface(modifier=Modifier.liquidGlass(20.dp,3.dp),color=Color.Transparent,shape = RoundedCornerShape(20.dp), tonalElevation = 0.dp) {
                 Row(Modifier.padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
@@ -1060,13 +1179,13 @@ private class PlayerVisual(
     }
     batchPreview?.let { preview -> BatchImportSheet(preview, vm) }
     singlePreview?.let { preview -> SingleImportSheet(preview, vm) }
-    importing.message?.let { message -> AlertDialog(onDismissRequest = vm::clearImportMessage, title = { Text("导入结果") }, text = { Text(message) }, confirmButton = { MotionTextButton(onClick = vm::clearImportMessage) { Text("知道了") } }) }
-    player.error?.let { error -> AlertDialog(onDismissRequest = vm::clearError, title = { Text("播放提示") }, text = { Text(error) }, confirmButton = { if (missingChapter != null) MotionTextButton(onClick = { vm.clearError(); relink() }) { Text("重新定位") } else MotionTextButton(onClick = vm::clearError) { Text("知道了") } }, dismissButton = { if (missingChapter != null) MotionTextButton(onClick = vm::clearError) { Text("稍后") } }) }
+    importing.message?.let { message -> GlassAlertDialog(onDismissRequest = vm::clearImportMessage, title = { Text("导入结果") }, text = { Text(message) }, confirmButton = { MotionTextButton(onClick = vm::clearImportMessage) { Text("知道了") } }) }
+    player.error?.let { error -> GlassAlertDialog(onDismissRequest = vm::clearError, title = { Text("播放提示") }, text = { Text(error) }, confirmButton = { if (missingChapter != null) MotionTextButton(onClick = { vm.clearError(); relink() }) { Text("重新定位") } else MotionTextButton(onClick = vm::clearError) { Text("知道了") } }, dismissButton = { if (missingChapter != null) MotionTextButton(onClick = vm::clearError) { Text("稍后") } }) }
     editing?.let { target ->
         var title by remember(target.id) { mutableStateOf(target.title) }
-        AlertDialog(onDismissRequest = { editing = null }, title = { Text("修改书名") }, text = { OutlinedTextField(title, { title = it }, singleLine = true, label = { Text("书名") }) }, confirmButton = { MotionTextButton(onClick = { vm.renameBook(target, title); editing = null }) { Text("保存") } }, dismissButton = { MotionTextButton(onClick = { editing = null }) { Text("取消") } })
+        GlassAlertDialog(onDismissRequest = { editing = null }, title = { Text("修改书名") }, text = { OutlinedTextField(title, { title = it }, singleLine = true, label = { Text("书名") }) }, confirmButton = { MotionTextButton(onClick = { vm.renameBook(target, title); editing = null }) { Text("保存") } }, dismissButton = { MotionTextButton(onClick = { editing = null }) { Text("取消") } })
     }
-    deleting?.let { target -> AlertDialog(onDismissRequest = { deleting = null }, title = { Text("从书架移除？") }, text = { Text("只删除应用中的记录，不会删除原始音频文件。") }, confirmButton = { MotionTextButton(onClick = { vm.deleteBook(target.id); deleting = null }) { Text("移除") } }, dismissButton = { MotionTextButton(onClick = { deleting = null }) { Text("取消") } }) }
+    deleting?.let { target -> GlassAlertDialog(onDismissRequest = { deleting = null }, title = { Text("从书架移除？") }, text = { Text("只删除应用中的记录，不会删除原始音频文件。") }, confirmButton = { MotionTextButton(onClick = { vm.deleteBook(target.id); deleting = null }) { Text("移除") } }, dismissButton = { MotionTextButton(onClick = { deleting = null }) { Text("取消") } }) }
     bookSettings?.let { stale ->
         val current = books.firstOrNull { it.id == stale.id }
         if (current == null) bookSettings = null
@@ -1076,7 +1195,7 @@ private class PlayerVisual(
     }
     backupPreview?.let { preview ->
         var restoreSettings by remember(preview) { mutableStateOf(false) }
-        AlertDialog(onDismissRequest = vm::dismissBackup, title = { Text("预览本地备份") },
+        GlassAlertDialog(onDismissRequest = vm::dismissBackup, title = { Text("预览本地备份") },
             text = { Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("备份含 ${preview.books} 本书、${preview.chapters} 章、${preview.bookmarks} 个书签；与现有书名冲突 ${preview.conflicts} 本，将跳过，不覆盖。")
                 Text("音频未包含在备份中；${preview.potentiallyNeedsAuthorization} 个章节 URI 的访问权限无法随备份转移，恢复后可能需要重新关联。")
@@ -1088,9 +1207,47 @@ private class PlayerVisual(
             confirmButton = { MotionTextButton(onClick = { vm.confirmBackup(restoreSettings) }) { Text("确认导入") } },
             dismissButton = { MotionTextButton(onClick = vm::dismissBackup) { Text("取消") } })
     }
-    backupMessage?.let { message -> AlertDialog(onDismissRequest = vm::dismissBackup,
+    backupMessage?.let { message -> GlassAlertDialog(onDismissRequest = vm::dismissBackup,
         title = { Text("本地备份") }, text = { Text(message) },
         confirmButton = { MotionTextButton(onClick = vm::dismissBackup) { Text("知道了") } }) }
+    if (readingLibraryOpen) ReadingLibrarySheet(readingBooks, readingBusy, readingAudioTarget,
+        onDismiss = { readingLibraryOpen = false }, onImport = { pickNovel(readingAudioTarget) },
+        onOpen = { novel -> readingLibraryOpen = false; chaptersOpen = false; vm.pauseForReading()
+            readerVm.open(novel.id, player, readingAudioTarget) }, onDelete = readerVm::remove)
+    // Retain the rendered page until its exit completes; clearing the session must
+    // not tear the native canvas down on the first frame of the return transition.
+    var lastReading by remember { mutableStateOf<ReadingSession?>(null) }
+    SideEffect { if(readingSession!=null) lastReading=readingSession }
+    AnimatedVisibility(readingSession!=null,
+        enter=slideInHorizontally(tween(380,easing=CubicBezierEasing(.22f,.7f,.25f,1f))){it},
+        exit=slideOutHorizontally(tween(340,easing=CubicBezierEasing(.22f,.7f,.25f,1f))){it}) {
+        (readingSession ?: lastReading)?.let { session ->
+            ReaderScreen(session, readerVm, vm, books, player, pickReaderFont, pickSubtitles, pickSentenceSync, listen={
+                session.book.audioBookId?.let { id -> scope.launch {
+                    if(!playerOpen || selected!=id) {
+                        // Prepare the listening destination behind the opaque reader.
+                        // Only the reader exit animates, avoiding two stacked transitions.
+                        openPlayer(id,null,false)
+                        motion.snapTo(1f)
+                        withFrameNanos { }
+                    }
+                    if(readingSession!=null) readerVm.close { closed ->
+                        val target=closed?.takeIf { it.book.syncEnabled && it.changedByReading }?.let { readerVm.audioTarget(it) }
+                        scope.launch {
+                            delay(360)
+                            if(readerVm.session.value==null && playerOpen && selected==id)
+                                vm.playBook(id,target?.index,autoplay=false,exactPositionMs=target?.positionMs)
+                        }
+                    }
+                } }
+            }) {
+                if(readingSession!=null) readerVm.close { }
+            }
+        }
+    }
+    readingMessage?.takeIf { readingSession==null }?.let { message -> GlassAlertDialog(onDismissRequest = readerVm::dismissMessage,
+        title = { Text("阅读提示") }, text = { Text(message) },
+        confirmButton = { MotionTextButton(onClick = readerVm::dismissMessage) { Text("知道了") } }) }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1101,10 +1258,8 @@ private class PlayerVisual(
             .padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("书籍设置 · ${book.title}", style = MaterialTheme.typography.titleLarge,
                 maxLines = 2, overflow = TextOverflow.Ellipsis)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MotionTextButton(onClick = { dismiss(onRename) }) { Text("修改书名") }
-                MotionTextButton(onClick = { dismiss(onCover) }) { Text("更换封面") }
-            }
+            GlassSegments(listOf(GlassSegment("修改书名"),GlassSegment("更换封面")),null,
+                {if(it==0)dismiss(onRename) else dismiss(onCover)},selectionMode=false)
             val allChapters by vm.chaptersByBook.collectAsStateWithLifecycle()
             val player by vm.playerUi.collectAsStateWithLifecycle()
             val list = allChapters[book.id].orEmpty()
@@ -1128,15 +1283,9 @@ private class PlayerVisual(
             MotionTextButton(onClick = { vm.setBookSpeed(book, null) }) { Text("倍速恢复全局默认") }
             HorizontalDivider()
             Text("片头跳过：${book.introOverride?.let { "$it 秒（本书）" } ?: "全局 ${settings.intro} 秒"}")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(0, 5, 10, 30).forEach { n ->
-                MotionFilterChip(selected = book.introOverride == n,
-                    onClick = { vm.setBookEdges(book, n, book.outroOverride) }, label = { Text("$n 秒") })
-            } }
+            GlassOptions(listOf(0,5,10,30).map{it to "$it 秒"},book.introOverride,{vm.setBookEdges(book,it,book.outroOverride)})
             Text("片尾跳过：${book.outroOverride?.let { "$it 秒（本书）" } ?: "全局 ${settings.outro} 秒"}")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(0, 5, 10, 30).forEach { n ->
-                MotionFilterChip(selected = book.outroOverride == n,
-                    onClick = { vm.setBookEdges(book, book.introOverride, n) }, label = { Text("$n 秒") })
-            } }
+            GlassOptions(listOf(0,5,10,30).map{it to "$it 秒"},book.outroOverride,{vm.setBookEdges(book,book.introOverride,it)})
             MotionTextButton(onClick = { vm.setBookEdges(book, null, null) }) { Text("片头片尾恢复全局默认") }
         }
     }
@@ -1152,7 +1301,7 @@ private fun progressLabel(book: Book, count: Int?): String {
 @Composable private fun Shelf(books: List<Book>, playingBookId: Long?, counts: Map<Long, Int>,
     busy: Boolean, found: Int, cancel: () -> Unit, anchors: MutableMap<String, Rect>,
     hiddenKey: String?, progress: () -> Float, onOpen: (Book) -> Unit, onPlay: (Book) -> Unit,
-    onEdit: (Book) -> Unit, onDelete: (Book) -> Unit, interactive: Boolean) {
+    onEdit: (Book) -> Unit, onDelete: (Book) -> Unit, interactive: Boolean, contentInsets:PaddingValues,actionMaterials:MutableMap<String,LiveGlassBackdrop>) {
     val motionSpeed = LocalMotionSpeed.current
     val listState = rememberLazyListState()
     var query by rememberSaveable { mutableStateOf("") }
@@ -1162,8 +1311,8 @@ private fun progressLabel(book: Book, count: Int?): String {
     var sorting by remember { mutableStateOf(false) }
     val visibleBooks = remember(books, query, filter, sort) { browseBooks(books, query, filter, sort) }
     DisposableEffect(Unit) { onDispose { anchors.remove("shelf:viewport") } }
-    LazyColumn(Modifier.fillMaxSize().onGloballyPositioned { anchors["shelf:viewport"] = it.boundsInRoot() }, state = listState, contentPadding = PaddingValues(horizontal = 20.dp, vertical = 16.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-        item { Text("让故事继续", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary) }
+    LazyColumn(Modifier.fillMaxSize().onGloballyPositioned { anchors["shelf:viewport"] = it.boundsInRoot() }, state = listState, contentPadding = PaddingValues(start=20.dp,end=20.dp,top=contentInsets.calculateTopPadding()+16.dp,bottom=contentInsets.calculateBottomPadding()+16.dp), verticalArrangement = Arrangement.spacedBy(22.dp)) {
+        item { Text("继续收听", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.primary) }
         val recent = books.firstOrNull { it.id == playingBookId }
             ?: books.firstOrNull { it.status != 0 }
         if (recent != null) item {
@@ -1172,19 +1321,19 @@ private fun progressLabel(book: Book, count: Int?): String {
             val pressed by interaction.collectIsPressedAsState()
             val scale by animateFloatAsState(if (pressed) 0.985f else 1f, Motion.press(motionSpeed), label = "续听按压")
             DisposableEffect(key) { onDispose { listOf("", ":cover", ":title", ":subtitle", ":action").forEach { anchors.remove("$key$it") } } }
-            Card(onClick = { onPlay(recent) }, modifier = Modifier.onGloballyPositioned { anchors[key] = it.sourceBoundsInRoot() }.graphicsLayer {
+            GlassCard(onClick = { onPlay(recent) }, modifier = Modifier.onGloballyPositioned { anchors[key] = it.sourceBoundsInRoot() }.graphicsLayer {
                 scaleX = scale; scaleY = scale
                 alpha = if (hiddenKey == key && progress() > 0f) 0f else 1f
-            }, interactionSource = interaction, colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary), shape = RoundedCornerShape(24.dp)) {
+            }, interactionSource = interaction, colors = CardDefaults.cardColors(containerColor = Color.Transparent), shape = RoundedCornerShape(24.dp)) {
                 Row(Modifier.fillMaxWidth().padding(20.dp), verticalAlignment = Alignment.CenterVertically) {
                     BookCover(recent.title, 52, recent.coverUri, Modifier.onGloballyPositioned { anchors["$key:cover"] = it.sourceBoundsInRoot() })
                     Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(recent.title, color = MaterialTheme.colorScheme.onPrimary, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                    Column(Modifier.weight(1f)) {
+                        Text(recent.title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
                             maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.onGloballyPositioned { anchors["$key:title"] = it.sourceBoundsInRoot() })
-                        Text(progressLabel(recent, counts[recent.id]), color = MaterialTheme.colorScheme.onPrimary,
-                            style = MaterialTheme.typography.labelLarge, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                        Text(progressLabel(recent, counts[recent.id]), color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.onGloballyPositioned { anchors["$key:subtitle"] = it.sourceBoundsInRoot() })
                     }
                 }
@@ -1195,10 +1344,10 @@ private fun progressLabel(book: Book, count: Int?): String {
             ShelfSearchHeader("我的书架 · ${visibleBooks.size}", query, { query = it }, searchOpen,
                 { searchOpen = it; if (!it) query = "" }, interactive) {
                 Box {
-                    MotionTextButton(onClick = { sorting = true }) {
-                        Icon(Icons.Default.Sort, null, Modifier.size(18.dp)); Spacer(Modifier.width(5.dp)); Text(sort.label)
+                    MotionIconButton(onClick = { sorting = true }) {
+                        Icon(Icons.Default.Sort, "书架排序", Modifier.size(20.dp))
                     }
-                    DropdownMenu(sorting, { sorting = false }) {
+                    GlassMenu(sorting, { sorting = false }) {
                         ShelfSort.entries.forEach { option ->
                             MotionMenuItem(text = { Text(option.label) }, onClick = { sort = option; sorting = false },
                                 leadingIcon = { if (option == sort) Icon(Icons.Default.Check, null) })
@@ -1208,11 +1357,7 @@ private fun progressLabel(book: Book, count: Int?): String {
             }
         }
         item {
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                ShelfFilter.entries.forEach { option ->
-                    MotionFilterChip(selected = option == filter, onClick = { filter = option }, label = { Text(option.label) })
-                }
-            }
+            GlassOptions(ShelfFilter.entries.map{it to it.label},filter,{filter=it})
         }
         if (books.isEmpty()) item {
             Column(Modifier.fillMaxWidth().padding(vertical = 52.dp), horizontalAlignment = Alignment.CenterHorizontally) {
@@ -1229,7 +1374,7 @@ private fun progressLabel(book: Book, count: Int?): String {
             }
         }
         itemsIndexed(visibleBooks, key = { _, item -> item.id }) { _, book ->
-            Box(Modifier.animateItem()) { BookRow(book, counts[book.id], anchors, hiddenKey, progress, onOpen, onEdit, onDelete) }
+            Box(Modifier.animateItem()) { BookRow(book, counts[book.id], anchors, hiddenKey, progress, onOpen, onEdit, onDelete,actionMaterials) }
         }
     }
 }
@@ -1254,15 +1399,16 @@ private fun progressLabel(book: Book, count: Int?): String {
         if (expanded && interactive) { withFrameNanos { }; focus.requestFocus() }
     }
     BoxWithConstraints(Modifier.fillMaxWidth().height(56.dp)) {
+        val titleMaxWidth=(maxWidth-112.dp).coerceAtLeast(0.dp)
         Row((if (expanded) Modifier.clearAndSetSemantics { } else Modifier).fillMaxSize()
             .graphicsLayer { alpha = 1f - Motion.fade(0f, 0.28f, progress) },
             verticalAlignment = Alignment.CenterVertically) {
-            Text(title, style = titleStyle, modifier = Modifier.onSizeChanged { titleWidth = it.width })
-            Spacer(Modifier.width(48.dp))
+            Text(title, style = titleStyle,maxLines=1,overflow=TextOverflow.Ellipsis, modifier = Modifier.widthIn(max=titleMaxWidth).onSizeChanged { titleWidth = it.width })
+            Spacer(Modifier.width(56.dp))
             Spacer(Modifier.weight(1f))
             sort()
         }
-        val left = with(density) { titleWidth.toDp() }
+        val left = with(density) { titleWidth.toDp()+8.dp }
         val fieldWidth = 48.dp + (maxWidth - 48.dp) * progress
         BasicTextField(query, onQuery, enabled = expanded, singleLine = true,
             textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
@@ -1297,10 +1443,9 @@ private fun progressLabel(book: Book, count: Int?): String {
 }
 
 @Composable private fun SettingsSlideTransition(motion: Animatable<Float, *>, root: IntSize,
-    open: Boolean, active: Boolean, settings: ListeningSettings, vm: MainViewModel, pickWallpaper: () -> Unit,
+    open: Boolean, active: Boolean, settings: ListeningSettings, vm: MainViewModel,
     exportBackup: () -> Unit, importBackup: () -> Unit, onClose: () -> Unit) {
     val density = LocalDensity.current
-    val background = MaterialTheme.colorScheme.background
     val contentLayer = rememberGraphicsLayer()
     // Retain composition but unplace its interactive nodes on exit. Only the
     // recorded drawing is placed; the shelf remains live without a hidden hit target.
@@ -1321,9 +1466,8 @@ private fun progressLabel(book: Book, count: Int?): String {
             // Fade the edge's depth with travel so no shadow remains after
             // the surface has left the screen.
             shadowElevation = with(density) { 8.dp.toPx() } * p
-        }.then(inputModifier).drawBehind {
-            drawRect(background)
-        }) {
+        }.then(inputModifier)) {
+                GlassPageBackground()
                 Scaffold(containerColor = Color.Transparent,
                     modifier = Modifier.fillMaxSize().layout { measurable, constraints ->
                         val child = measurable.measure(constraints)
@@ -1340,7 +1484,7 @@ private fun progressLabel(book: Book, count: Int?): String {
                     }
                 }) { padding ->
                 Box(Modifier.fillMaxSize().padding(padding).navigationBarsPadding()) {
-                    SettingsPage(settings, vm, pickWallpaper, exportBackup, importBackup, open)
+                    SettingsPage(settings, vm, exportBackup, importBackup, open)
                 }
                 }
                 if (!open && active) Canvas(Modifier.fillMaxSize()) { drawLayer(contentLayer) }
@@ -1370,34 +1514,36 @@ private fun coverBaseColor(title: String) =
     }
 }
 
-@Composable private fun BookRow(book: Book, count: Int?, anchors: MutableMap<String, Rect>, hiddenKey: String?, progress: () -> Float, onOpen: (Book) -> Unit, onEdit: (Book) -> Unit, onDelete: (Book) -> Unit) {
+@Composable private fun BookRow(book: Book, count: Int?, anchors: MutableMap<String, Rect>, hiddenKey: String?, progress: () -> Float, onOpen: (Book) -> Unit, onEdit: (Book) -> Unit, onDelete: (Book) -> Unit,actionMaterials:MutableMap<String,LiveGlassBackdrop>) {
     val motionSpeed = LocalMotionSpeed.current
     var menu by remember { mutableStateOf(false) }
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
     val scale by animateFloatAsState(if (pressed) 0.985f else 1f, Motion.press(motionSpeed), label = "书籍按压")
     val key = "book:${book.id}"
+    val actionMaterial=rememberLiveGlassBackdrop()
+    DisposableEffect(key){actionMaterials[key]=actionMaterial;onDispose{actionMaterials.remove(key)}}
     DisposableEffect(key) { onDispose { listOf("", ":cover", ":title", ":subtitle", ":action").forEach { anchors.remove("$key$it") } } }
-    Card(onClick = { onOpen(book) }, modifier = Modifier.onGloballyPositioned { anchors[key] = it.sourceBoundsInRoot() }.graphicsLayer {
+    GlassCard(onClick = { onOpen(book) }, modifier = Modifier.onGloballyPositioned { anchors[key] = it.sourceBoundsInRoot() }.graphicsLayer {
         scaleX = scale; scaleY = scale
         alpha = if (hiddenKey == key && progress() > 0f) 0f else 1f
-    }, interactionSource = interaction, shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    }, interactionSource = interaction, shape = RoundedCornerShape(18.dp), colors = CardDefaults.cardColors(containerColor = Color.Transparent)) {
         Row(Modifier.fillMaxWidth().padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
-            BookCover(book.title, 68, book.coverUri, Modifier.onGloballyPositioned { anchors["$key:cover"] = it.sourceBoundsInRoot() })
+            BookCover(book.title, 60, book.coverUri, Modifier.onGloballyPositioned { anchors["$key:cover"] = it.sourceBoundsInRoot() })
             Spacer(Modifier.width(14.dp))
             Column(Modifier.weight(1f)) {
-                Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                Text(book.title, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.onGloballyPositioned { anchors["$key:title"] = it.sourceBoundsInRoot() })
-                Text(progressLabel(book, count), color = MaterialTheme.colorScheme.primary,
+                Text(progressLabel(book, count),style=MaterialTheme.typography.bodySmall,maxLines=1,overflow=TextOverflow.Ellipsis, color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.onGloballyPositioned { anchors["$key:subtitle"] = it.sourceBoundsInRoot() })
             }
             Box {
                 val editInteraction = remember { MutableInteractionSource() }
                 val deleteInteraction = remember { MutableInteractionSource() }
-                MotionIconButton(onClick = { menu = true }, modifier = Modifier.onGloballyPositioned {
+                MotionIconButton(onClick = { menu = true }, glassOutput=actionMaterial, modifier = Modifier.onGloballyPositioned {
                     anchors["$key:action"] = it.sourceBoundsInRoot()
                 }) { Icon(Icons.Default.MoreVert, "更多操作") }
-                DropdownMenu(menu, { menu = false }) {
+                GlassMenu(menu, { menu = false }) {
                     MotionMenuItem(text = { Text("书籍设置") }, onClick = { menu = false; onEdit(book) },
                         modifier = Modifier, interactionSource = editInteraction)
                     MotionMenuItem(text = { Text("移除书籍") }, onClick = { menu = false; onDelete(book) },
@@ -1425,15 +1571,22 @@ private fun coverBaseColor(title: String) =
     }
 }
 
+@Composable private fun SeekGlyph(seconds:Int,forward:Boolean){
+    Box(Modifier.size(36.dp).semantics{contentDescription=if(forward)"快进 $seconds 秒" else "快退 $seconds 秒"},contentAlignment=Alignment.Center){
+        Icon(Icons.Default.Replay,null,Modifier.size(34.dp).graphicsLayer{scaleX=if(forward)-1f else 1f})
+        Text("$seconds",Modifier.offset(y=2.dp),style=MaterialTheme.typography.labelSmall.copy(fontSize=10.sp),fontWeight=FontWeight.SemiBold)
+    }
+}
+
 @Composable private fun PlayerSurface(book: Book, chapters: List<Chapter>, state: PlayerUi, rewind: Int, forward: Int, vm: MainViewModel,
+    readNovel: () -> Unit,
     onBack: () -> Unit, openChapters: () -> Unit, pickCover: (Book) -> Unit, edit: (Book) -> Unit,
     onPlaybackAction: () -> Unit,
     onCover: (Rect) -> Unit, onTextLayout: (String, Rect) -> Unit, visual: PlayerVisual,
     drag: (Float, Boolean, Float) -> Unit, heightPx: Float) {
     var bookmarksPanel by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        Row(Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 18.dp, vertical = 10.dp)
-            .pointerInput(heightPx) {
+        val collapseGesture=Modifier.pointerInput(heightPx) {
                 var fraction = 1f
                 var velocity = 0f
                 var previousTime = 0L
@@ -1450,13 +1603,16 @@ private fun coverBaseColor(title: String) =
                     onDragEnd = { drag(fraction, true, velocity) },
                     onDragCancel = { drag(fraction, true, Float.NEGATIVE_INFINITY) }
                 )
-            }.graphicsLayer { alpha = visual.headerAlpha() }, verticalAlignment = Alignment.CenterVertically) {
+            }
+        Row(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBarsIgnoringVisibility).padding(horizontal=18.dp,vertical=10.dp)
+            .graphicsLayer{alpha=visual.headerAlpha()},verticalAlignment=Alignment.CenterVertically){
             MotionIconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "收起播放器") }
-            Text("正在收听", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+            Text("正在收听", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f).then(collapseGesture))
+            MotionIconButton(onClick=readNovel) { Icon(Icons.AutoMirrored.Filled.MenuBook,"继续阅读") }
             Box {
                 var menuOpen by remember { mutableStateOf(false) }
                 MotionIconButton(onClick = { menuOpen = true }) { Icon(Icons.Default.MoreVert, "更多操作") }
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                GlassMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                     MotionMenuItem(text = { Text("书籍设置") }, onClick = { menuOpen = false; edit(book) })
                     MotionMenuItem(text = { Text("书签") }, onClick = { menuOpen = false; bookmarksPanel = true })
                 }
@@ -1489,13 +1645,15 @@ private fun coverBaseColor(title: String) =
     val playInteraction = remember { MutableInteractionSource() }
     val index = if (state.bookId == book.id) state.index else
         chapters.indexOfFirst { it.id == book.chapterId }.takeIf { it >= 0 } ?: book.chapterIndex
-    val duration = if (state.bookId == book.id) state.duration else 0
-    val position = if (state.bookId == book.id) state.position else 0L
+    val duration = if (state.bookId == book.id) state.duration else chapters.getOrNull(index)?.durationMs ?: 0L
+    val position = if (state.bookId == book.id) state.position else book.positionMs
     val shownPosition = seeking?.let { (it * duration).toLong() } ?: position
     LaunchedEffect(skipDelta) { if (skipDelta != 0) { delay(650); skipDelta = 0 } }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).navigationBarsPadding().padding(horizontal = 26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+        .windowInsetsPadding(WindowInsets.navigationBarsIgnoringVisibility).padding(horizontal = 26.dp), horizontalAlignment = Alignment.CenterHorizontally) {
         Spacer(Modifier.height(8.dp))
-        Box(Modifier.size(180.dp).onGloballyPositioned { onCover(it.boundsInRoot()) })
+        val coverExtent=(LocalConfiguration.current.screenHeightDp-496).coerceIn(112,210).dp
+        Box(Modifier.size(coverExtent).onGloballyPositioned { onCover(it.boundsInRoot()) })
         Spacer(Modifier.height(24.dp))
         Text(book.title, style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold,
             maxLines = 2, overflow = TextOverflow.Ellipsis,
@@ -1546,40 +1704,46 @@ private fun coverBaseColor(title: String) =
             }
         }
         Spacer(Modifier.height(8.dp))
-        AppSlider(value = seeking ?: if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f, onValueChange = { seeking = it }, onValueChangeFinished = { seeking?.let { vm.seek((it * duration).toLong()) }; seeking = null }, enabled = duration > 0)
+        AppSlider(value = seeking ?: if (duration > 0) (position.toFloat() / duration).coerceIn(0f, 1f) else 0f, onValueChange = { seeking = it }, onValueChangeFinished = { seeking?.let { vm.seek((it * duration).toLong()) }; seeking = null }, onValueChangeCancelled = { seeking = null }, enabled = duration > 0)
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) { Text(clock(shownPosition), style = MaterialTheme.typography.bodySmall); Text("本章 · ${if (duration > 0) clock(duration) else "--:--"}", style = MaterialTheme.typography.bodySmall) }
         Box(Modifier.fillMaxWidth().height(30.dp), contentAlignment = Alignment.Center) {
             AnimatedContent(skipDelta, transitionSpec = { fadeIn(tween(Motion.duration(120, motionSpeed))) togetherWith fadeOut(tween(Motion.duration(170, motionSpeed))) }, label = "快进快退反馈") { delta ->
                 if (delta != 0) Text(if (delta > 0) "+$delta 秒" else "$delta 秒", color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.labelLarge)
             }
         }
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly, verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().height(84.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             MotionIconButton(onClick = { onPlaybackAction(); vm.previous(book.id) }, enabled = index > 0,
-                modifier = Modifier.size(48.dp)) { Icon(Icons.Default.SkipPrevious, "上一章") }
-            MotionIconButton(onClick = { onPlaybackAction(); vm.skipBack(); skipDelta -= rewind }, modifier = Modifier.size(52.dp)) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.Replay, "快退 $rewind 秒", modifier = Modifier.size(24.dp)); Text("$rewind", style = MaterialTheme.typography.labelSmall) } }
-            FilledIconButton(onClick = { onPlaybackAction(); if (state.loadingBookId == book.id || state.bookId == book.id) vm.toggle() else vm.playBook(book.id) }, modifier = pressLayer(Modifier.size(72.dp), playInteraction, pressedScale = 0.87f, reboundDamping = 0.58f), interactionSource = playInteraction) { AnimatedPlayIcon(state.isPlaying && state.bookId == book.id) }
-            MotionIconButton(onClick = { onPlaybackAction(); vm.skipForward(); skipDelta += forward }, modifier = Modifier.size(52.dp)) { Column(horizontalAlignment = Alignment.CenterHorizontally) { Icon(Icons.Default.Forward, "快进 $forward 秒", modifier = Modifier.size(24.dp)); Text("$forward", style = MaterialTheme.typography.labelSmall) } }
+                modifier = Modifier.size(48.dp),plain=true) { Icon(Icons.Default.SkipPrevious, "上一章",Modifier.size(28.dp)) }
+            MotionIconButton(onClick = { onPlaybackAction(); vm.skipBack(); skipDelta -= rewind }, modifier = Modifier.size(48.dp),plain=true) { SeekGlyph(rewind,false) }
+            FilledIconButton(onClick = { if(acceptLiquidClick(playInteraction)){onPlaybackAction(); if (state.loadingBookId == book.id || state.bookId == book.id) vm.toggle() else vm.playBook(book.id)} }, modifier = pressLayer(Modifier.size(76.dp), playInteraction, pressedScale = 0.87f, reboundDamping = 0.58f).liquidGlass(38.dp,4.dp,interaction=playInteraction), colors=IconButtonDefaults.filledIconButtonColors(containerColor=Color.Transparent,contentColor=MaterialTheme.colorScheme.onSurface), interactionSource = playInteraction) {
+                Icon(if(state.isPlaying && state.bookId==book.id)Icons.Default.Pause else Icons.Default.PlayArrow,if(state.isPlaying && state.bookId==book.id)"暂停" else "播放",Modifier.size(34.dp))
+            }
+            MotionIconButton(onClick = { onPlaybackAction(); vm.skipForward(); skipDelta += forward }, modifier = Modifier.size(48.dp),plain=true) { SeekGlyph(forward,true) }
             MotionIconButton(onClick = { onPlaybackAction(); vm.next(book.id) }, enabled = index < chapters.lastIndex,
-                modifier = Modifier.size(48.dp)) { Icon(Icons.Default.SkipNext, "下一章") }
+                modifier = Modifier.size(48.dp),plain=true) { Icon(Icons.Default.SkipNext, "下一章",Modifier.size(28.dp)) }
         }
-        Spacer(Modifier.height(22.dp))
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-            MotionTextButton(onClick = { speedPanel = true }) { Icon(Icons.Default.Speed, null); Spacer(Modifier.width(5.dp)); Text("${if (state.bookId == book.id) state.speed else book.speedOverride ?: settings.defaultSpeed}×") }
-            MotionTextButton(onClick = { timerPanel = true }) { Icon(Icons.Default.Timer, null); Spacer(Modifier.width(5.dp)); Text(when {
-                !timer.active || timer.bookId != book.id -> "定时停止"
-                timer.mode == "chapter" -> "还听 ${timer.chaptersRemaining} 章"
-                else -> "剩余 ${(timer.remainingMs + 59_999) / 60_000} 分"
-            }) }
-            MotionTextButton(onClick = openChapters) { Icon(Icons.AutoMirrored.Filled.List, null); Spacer(Modifier.width(5.dp)); Text("章节") }
-        }
+        Spacer(Modifier.height(24.dp))
+        GlassSegments(listOf(
+            GlassSegment("${if(state.bookId==book.id)state.speed else book.speedOverride?:settings.defaultSpeed}×"),
+            GlassSegment(when{
+                !timer.active || timer.bookId!=book.id->"定时"
+                timer.mode=="chapter"->"还听 ${timer.chaptersRemaining} 章"
+                else->"${(timer.remainingMs+59_999)/60_000}分"
+            },Icons.Default.Timer,description="定时停止"),
+            GlassSegment("章节",Icons.AutoMirrored.Filled.List)),null,
+            {when(it){0->speedPanel=true;1->timerPanel=true;2->openChapters()}},compact=true,selectionMode=false)
+        Spacer(Modifier.height(24.dp))
     }
     if (speedPanel) AppSheet(onDismiss = { speedPanel = false }) { _ ->
         val currentSpeed = if (state.bookId == book.id) state.speed else book.speedOverride ?: settings.defaultSpeed
         var speedDraft by remember(book.id) { mutableFloatStateOf(currentSpeed) }
-        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Text("播放速度", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-            Text("${"%.2f".format(speedDraft)}×", style = MaterialTheme.typography.headlineMedium,
-                color = MaterialTheme.colorScheme.primary)
+        Column(Modifier.fillMaxWidth().padding(horizontal = 24.dp), verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Row(Modifier.fillMaxWidth(),verticalAlignment=Alignment.CenterVertically,horizontalArrangement=Arrangement.SpaceBetween){
+                Text("播放速度", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
+                Text("${"%.2f".format(speedDraft)}×", style = MaterialTheme.typography.headlineSmall,
+                    color = MaterialTheme.colorScheme.onSurface,fontWeight=FontWeight.Medium)
+            }
+            Column{
             AppSlider(value = speedDraft, onValueChange = { speedDraft = it },
                 onValueChangeFinished = { vm.speed((speedDraft * 20f).roundToInt() / 20f); haptics.selection() },
                 valueRange = 0.5f..3f)
@@ -1587,11 +1751,11 @@ private fun coverBaseColor(title: String) =
                 Text("0.5×", style = MaterialTheme.typography.bodySmall)
                 Text("3×", style = MaterialTheme.typography.bodySmall)
             }
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceEvenly) {
-                listOf(1f, 1.25f, 1.5f, 2f).forEach { speed ->
-                    MotionTextButton(onClick = { speedDraft = speed; vm.speed(speed) }) { Text("${speed}×") }
-                }
             }
+            val speeds=listOf(1f,1.25f,1.5f,2f)
+            GlassOptions(speeds.map{it to "${it}×"},speeds.firstOrNull{kotlin.math.abs(speedDraft-it)<.025f},
+                {speedDraft=it;vm.speed(it)})
+            Spacer(Modifier.height(4.dp))
         }
     }
     if (timerPanel) SleepTimerSheet(book, state, timer, chapters.size, vm) { timerPanel = false }
@@ -1604,7 +1768,7 @@ private fun coverBaseColor(title: String) =
             if (bookmarks.isEmpty()) Text("暂无书签")
             bookmarks.forEach { mark ->
                 val title = chapters.firstOrNull { it.id == mark.chapterId }?.title ?: "章节需重新关联"
-                Card(Modifier.fillMaxWidth()) {
+                GlassCard(Modifier.fillMaxWidth()) {
                     Column(Modifier.padding(12.dp)) {
                         Text("$title · ${clock(mark.positionMs)}", maxLines = 2, overflow = TextOverflow.Ellipsis)
                         if (mark.note.isNotBlank()) Text(mark.note, style = MaterialTheme.typography.bodySmall)
@@ -1620,14 +1784,14 @@ private fun coverBaseColor(title: String) =
     }
     if (creatingBookmark) {
         var note by remember { mutableStateOf("") }
-        AlertDialog(onDismissRequest = { creatingBookmark = false }, title = { Text("添加书签") },
+        GlassAlertDialog(onDismissRequest = { creatingBookmark = false }, title = { Text("添加书签") },
             text = { OutlinedTextField(note, { note = it }, label = { Text("备注（可选）") }, maxLines = 3) },
             confirmButton = { MotionTextButton(onClick = { haptics.confirmation(); vm.addBookmark(book.id, note); creatingBookmark = false }) { Text("保存") } },
             dismissButton = { MotionTextButton(onClick = { creatingBookmark = false }) { Text("取消") } })
     }
     editingBookmark?.let { mark ->
         var note by remember(mark.id) { mutableStateOf(mark.note) }
-        AlertDialog(onDismissRequest = { editingBookmark = null }, title = { Text("修改书签备注") },
+        GlassAlertDialog(onDismissRequest = { editingBookmark = null }, title = { Text("修改书签备注") },
             text = { OutlinedTextField(note, { note = it }, maxLines = 3) },
             confirmButton = { MotionTextButton(onClick = { vm.editBookmark(mark, note); editingBookmark = null }) { Text("保存") } },
             dismissButton = { MotionTextButton(onClick = { editingBookmark = null }) { Text("取消") } })
@@ -1671,9 +1835,9 @@ private fun coverBaseColor(title: String) =
                 val (index, chapter) = pair
                 val interaction = remember(chapter.id) { MutableInteractionSource() }
                 val selected = index == current
-                Card(onClick = { choose(index) }, modifier = pressLayer(Modifier.fillMaxWidth().animateItem(), interaction, 0.985f),
+                GlassCard(onClick = { choose(index) }, modifier = pressLayer(Modifier.fillMaxWidth().animateItem(), interaction, 0.985f),
                     interactionSource = interaction, shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface)) {
+                    colors = CardDefaults.cardColors(containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha=.13f) else Color.Transparent)) {
                     Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Box(Modifier.size(38.dp).clip(RoundedCornerShape(12.dp))
                             .background(MaterialTheme.colorScheme.primary.copy(alpha = if (selected) 0.16f else 0.07f)), contentAlignment = Alignment.Center) {
@@ -1707,7 +1871,7 @@ private fun coverBaseColor(title: String) =
             }
         }
     }
-    if (jumpOpen) AlertDialog(onDismissRequest = { jumpOpen = false }, title = { Text("定位章节") },
+    if (jumpOpen) GlassAlertDialog(onDismissRequest = { jumpOpen = false }, title = { Text("定位章节") },
         text = { OutlinedTextField(jump, { jump = it.filter(Char::isDigit) }, singleLine = true,
             label = { Text("章节序号 · 1–${chapters.size}") }, isError = jump.isNotEmpty() && jump.toIntOrNull() !in 1..chapters.size) },
         confirmButton = { MotionTextButton(onClick = {
@@ -1725,6 +1889,7 @@ private fun coverBaseColor(title: String) =
         ((timer.remainingMs + 59_999) / 60_000).coerceIn(1, 180).toFloat() else 30f) }
     var chapterCount by remember { mutableFloatStateOf(if (timer.active && timer.bookId == book.id) timer.chaptersRemaining.coerceAtLeast(1).toFloat() else 1f) }
     var fade by remember { mutableIntStateOf(timer.fadeSeconds) }
+    var adjustingMinutes by remember { mutableStateOf(false) }
     val compact = LocalConfiguration.current.screenHeightDp < 580
     val gap = if (compact) 2.dp else 8.dp
     val availableChapters = (totalChapters - if (state.bookId == book.id) state.index else book.chapterIndex).coerceIn(1, 20)
@@ -1738,22 +1903,24 @@ private fun coverBaseColor(title: String) =
                 fontWeight = FontWeight.SemiBold)
             if (!compact || timer.active) Text(if (timer.active && timer.bookId == book.id) {
                 if (timer.mode == "chapter") "已开启 · 再听 ${timer.chaptersRemaining} 章" else "已开启 · 剩余 ${(timer.remainingMs + 59_999) / 60_000} 分钟"
-            } else "伴你入睡，到点轻轻停下", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-                MotionFilterChip(!chapterMode, { chapterMode = false }, { Text("按时间") }, Modifier.weight(1f))
-                MotionFilterChip(chapterMode, { chapterMode = true }, { Text("按章节") }, Modifier.weight(1f))
-            }
+            } else "按时长或章节自动停止播放", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            GlassOptions(listOf(false to "按时间",true to "按章节"),chapterMode,{chapterMode=it})
             // Keep both modes the same height so changing mode never shifts the sheet anchor.
-            Box(Modifier.fillMaxWidth().height(140.dp)) {
+            Box(Modifier.fillMaxWidth().height(164.dp)) {
             Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(gap)) {
             if (!chapterMode) {
-                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                    listOf(15, 30, 45, 60).forEach { value ->
-                        MotionFilterChip(minutes.roundToInt() == value, { minutes = value.toFloat() }, { Text("$value 分") })
-                    }
-                }
+                GlassOptions(listOf(15,30,45,60).map{it to "$it 分"},
+                    minutes.roundToInt().takeIf{!adjustingMinutes},{minutes=it.toFloat()})
                 Text("${minutes.roundToInt()} 分钟后停止", style = MaterialTheme.typography.titleMedium)
                 AppSlider(minutes, { minutes = it }, valueRange = 1f..180f,
+                    modifier=Modifier.pointerInput(Unit){
+                        awaitEachGesture{
+                            awaitFirstDown(requireUnconsumed=false,pass=PointerEventPass.Initial)
+                            adjustingMinutes=true
+                            try{do{val event=awaitPointerEvent(PointerEventPass.Initial)}while(event.changes.any{it.pressed})}
+                            finally{adjustingMinutes=false}
+                        }
+                    },
                     onValueChangeFinished = { minutes = minutes.roundToInt().toFloat() })
             } else {
                 Text(if (chapterCount.roundToInt() == 1) "本章结束后停止" else "再听 ${chapterCount.roundToInt()} 章后停止",
@@ -1767,11 +1934,7 @@ private fun coverBaseColor(title: String) =
             }
             HorizontalDivider()
             Text("停止前音量淡出", style = MaterialTheme.typography.titleSmall)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                listOf(0, 10, 30).forEach { seconds ->
-                    MotionFilterChip(fade == seconds, { fade = seconds }, { Text(if (seconds == 0) "关闭" else "$seconds 秒") })
-                }
-            }
+            GlassOptions(listOf(0,10,30).map{it to if(it==0)"关闭" else "$it 秒"},fade,{fade=it})
             if (state.bookId != book.id) Text("播放本书后可以启用定时", style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
@@ -1836,7 +1999,7 @@ private fun coverBaseColor(title: String) =
             }
             LazyColumn(Modifier.weight(1f), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 itemsIndexed(preview.groups, key = { _, group -> group.sourceTreeUri }) { _, group ->
-                    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
+                    GlassCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {
                         Row(Modifier.padding(12.dp), verticalAlignment = Alignment.CenterVertically) {
                             MotionCheckbox(selected[group.sourceTreeUri] == true,
                                 { selected[group.sourceTreeUri] = it }, enabled = group.freshCount > 0)
@@ -1865,8 +2028,8 @@ private fun coverBaseColor(title: String) =
     val haptics = LocalAppHaptics.current
     val arrow by animateFloatAsState(if (expanded) 180f else 0f,
         tween(Motion.duration(220, motionSpeed), easing = Motion.smallCurve), label = "设置分组箭头")
-    Card(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
+    GlassCard(Modifier.fillMaxWidth(), shape = RoundedCornerShape(22.dp),
+        colors = CardDefaults.cardColors(containerColor = Color.Transparent)) {
         Column {
             Row(pressLayer(Modifier.fillMaxWidth(), interaction, 0.985f).clickable(interactionSource = interaction,
                 indication = null, onClickLabel = if (expanded) "收起$title" else "展开$title",
@@ -1891,7 +2054,7 @@ private fun coverBaseColor(title: String) =
 }
 
 @Composable private fun SettingsPage(settings: ListeningSettings, vm: MainViewModel,
-    pickWallpaper: () -> Unit, exportBackup: () -> Unit, importBackup: () -> Unit, open: Boolean) {
+    exportBackup: () -> Unit, importBackup: () -> Unit, open: Boolean) {
     val haptics = LocalAppHaptics.current
     val context = LocalContext.current
     val days by vm.listeningDays.collectAsStateWithLifecycle()
@@ -1902,52 +2065,61 @@ private fun coverBaseColor(title: String) =
     var speedDraft by rememberSaveable { mutableFloatStateOf(settings.transitionSpeed) }
     var playbackSpeedDraft by rememberSaveable { mutableFloatStateOf(settings.defaultSpeed) }
     var undoSecondsDraft by rememberSaveable { mutableFloatStateOf(settings.progressUndoSeconds.toFloat()) }
-    var blurDraft by rememberSaveable { mutableFloatStateOf(settings.wallpaperBlur) }
     var hapticDraft by rememberSaveable { mutableFloatStateOf(settings.hapticStrength.toFloat()) }
+    var wallpaperBlurDraft by rememberSaveable{mutableFloatStateOf(settings.wallpaperBlur.toFloat())}
+    val glassDraft=LocalGlassAppearance.current
+    LaunchedEffect(settings.wallpaperBlur){wallpaperBlurDraft=settings.wallpaperBlur.toFloat()}
+    val wallpaperContext=LocalContext.current
+    val wallpaperPicker=androidx.activity.compose.rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()){uri->
+        if(uri!=null){runCatching{wallpaperContext.contentResolver.takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION)};vm.wallpaper(uri.toString())}
+    }
     LaunchedEffect(settings.transitionSpeed) { speedDraft = settings.transitionSpeed }
     LaunchedEffect(settings.defaultSpeed) { playbackSpeedDraft = settings.defaultSpeed }
     LaunchedEffect(settings.progressUndoSeconds) { undoSecondsDraft = settings.progressUndoSeconds.toFloat() }
-    LaunchedEffect(settings.wallpaperBlur) { blurDraft = settings.wallpaperBlur }
     LaunchedEffect(settings.hapticStrength) { hapticDraft = settings.hapticStrength.toFloat() }
-    Column(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background)
+    Column(Modifier.fillMaxSize()
         .verticalScroll(scroll).padding(18.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        SettingsSection("外观与背景", "主题、书架壁纸、背景模糊", expanded == "appearance",
+        SettingsSection("显示与壁纸", "主题、壁纸与背景模糊", expanded == "appearance",
             { expanded = if (expanded == "appearance") "" else "appearance" }) {
             Text("显示主题", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                listOf("system" to "跟随系统", "light" to "浅色", "dark" to "深色").forEach { (value, label) ->
-                    MotionFilterChip(selected = settings.theme == value, onClick = { if (settings.theme != value) haptics.selection(); vm.theme(value) }, label = { Text(label) })
-                }
-            }
+            GlassOptions(listOf("system" to "跟随系统","light" to "浅色","dark" to "深色"),settings.theme,{vm.theme(it)})
             HorizontalDivider()
-            Text("书架壁纸", style = MaterialTheme.typography.labelLarge)
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                wallpaperChoices.forEach { choice ->
-                    val interaction = remember(choice.id) { MutableInteractionSource() }
-                    Card(onClick = { if (settings.wallpaper != choice.id) haptics.selection(); vm.wallpaper(choice.id) }, modifier = pressLayer(Modifier.weight(1f), interaction),
-                        interactionSource = interaction,
-                        border = if (settings.wallpaper == choice.id) BorderStroke(2.dp, MaterialTheme.colorScheme.primary) else null) {
-                        Box(Modifier.fillMaxWidth().height(88.dp)) {
-                            WallpaperSurface(choice.id, null, Modifier.fillMaxSize(), scrimAlpha = 0.3f)
-                            Text(choice.label, Modifier.align(Alignment.BottomStart).padding(8.dp), color = Color.White,
-                                style = MaterialTheme.typography.labelMedium)
-                        }
-                    }
-                }
+            Text("壁纸",style=MaterialTheme.typography.labelLarge)
+            FlowRow(horizontalArrangement=Arrangement.spacedBy(12.dp),verticalArrangement=Arrangement.spacedBy(8.dp)){
+                MotionFilterChip(settings.wallpaperUri==null,{vm.wallpaper(null)},{Text("默认光带")})
+                MotionTextButton(onClick={wallpaperPicker.launch(arrayOf("image/*"))},compact=true){Icon(Icons.Default.Image,null,Modifier.size(18.dp));Spacer(Modifier.width(6.dp));Text(if(settings.wallpaperUri==null)"选择图片" else "更换图片")}
             }
-            MotionFilterChip(selected = settings.wallpaper == "custom", onClick = pickWallpaper,
-                label = { Text(if (settings.wallpaperUri == null) "选择本地图片" else "更换本地图片") })
-            Box(Modifier.fillMaxWidth().height(110.dp).clip(RoundedCornerShape(16.dp))) {
-                WallpaperSurface(settings.wallpaper, settings.wallpaperUri, Modifier.fillMaxSize(),
-                    scrimAlpha = 0.18f, blurRadius = blurDraft)
-                Text("背景预览", Modifier.align(Alignment.BottomStart).padding(12.dp), color = Color.White)
+            if(settings.wallpaperUri!=null)Text("自选图片会适当降低亮度，保持文字清晰。",style=MaterialTheme.typography.bodySmall)
+            Text("模糊程度 · ${wallpaperBlurDraft.roundToInt()}%",style=MaterialTheme.typography.labelLarge)
+            AppSlider(wallpaperBlurDraft,{wallpaperBlurDraft=it},valueRange=0f..100f,onValueChangeFinished={vm.wallpaperBlur(wallpaperBlurDraft.roundToInt())})
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
+                Text("清晰",style=MaterialTheme.typography.bodySmall)
+                MotionTextButton(onClick={wallpaperBlurDraft=28f;vm.wallpaper(null);vm.wallpaperBlur(28)}){Text("恢复默认")}
+                Text("柔和",style=MaterialTheme.typography.bodySmall)
             }
-            Text("壁纸模糊程度 ${blurDraft.roundToInt()}", style = MaterialTheme.typography.labelLarge)
-            AppSlider(value = blurDraft, onValueChange = { blurDraft = it },
-                onValueChangeFinished = { vm.wallpaperBlur(blurDraft.roundToInt().toFloat()) },
-                valueRange = 0f..24f, steps = 23)
-            Text("仅对自定义壁纸生效，不影响文字和控件。", style = MaterialTheme.typography.bodySmall)
         }
+
+        SettingsSection("液态玻璃", "通透度、边缘阴影与折射", expanded == "glass",
+            { expanded = if (expanded == "glass") "" else "glass" }) {
+            val glass=glassDraft.value
+            Text("通透度 · ${signedGlassPercentage(glass.transparency)}",style=MaterialTheme.typography.labelLarge)
+            AppSlider(glass.transparency,{glassDraft.value=glassDraft.value.copy(transparency=it)},
+                valueRange=-100f..100f,onValueChangeFinished={vm.glass(glassDraft.value)})
+            Text("边缘阴影 · ${signedGlassPercentage(glass.edgeShadow)}",style=MaterialTheme.typography.labelLarge)
+            AppSlider(glass.edgeShadow,{glassDraft.value=glassDraft.value.copy(edgeShadow=it)},
+                valueRange=-100f..100f,onValueChangeFinished={vm.glass(glassDraft.value)})
+            Text("折射强度 · ${signedGlassPercentage(glass.refraction)}",style=MaterialTheme.typography.labelLarge)
+            AppSlider(glass.refraction,{glassDraft.value=glassDraft.value.copy(refraction=it)},
+                valueRange=-100f..100f,onValueChangeFinished={vm.glass(glassDraft.value)})
+            Row(Modifier.fillMaxWidth(),horizontalArrangement=Arrangement.SpaceBetween){
+                Text("−100%",style=MaterialTheme.typography.bodySmall)
+                Text("0% 默认",style=MaterialTheme.typography.bodySmall)
+                Text("+100%",style=MaterialTheme.typography.bodySmall)
+            }
+            Text("0% 为默认效果。负值减弱，正值增强；通透度越高，底层背景越清晰。拖动时实时预览。",style=MaterialTheme.typography.bodySmall)
+            MotionTextButton(onClick={glassDraft.value=com.tingye.app.data.GlassAppearance();vm.glass(glassDraft.value)}){Text("恢复默认")}
+        }
+
         SettingsSection("界面动效", "页面动画速度", expanded == "motion",
             { expanded = if (expanded == "motion") "" else "motion" }) {
             Text("页面过渡速度 ${"%.1f".format(speedDraft)}×", style = MaterialTheme.typography.labelLarge)
@@ -1986,10 +2158,7 @@ private fun coverBaseColor(title: String) =
             Text("音量均衡", style = MaterialTheme.typography.labelLarge)
             Text("自动调节录音音量，减小章节间的响度差异。",
                 style = MaterialTheme.typography.bodySmall)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                MotionFilterChip(selected = !settings.volumeLeveling, onClick = { vm.volumeLeveling(false) }, label = { Text("关闭") })
-                MotionFilterChip(selected = settings.volumeLeveling, onClick = { vm.volumeLeveling(true) }, label = { Text("开启") })
-            }
+            GlassOptions(listOf(false to "关闭",true to "开启"),settings.volumeLeveling,{vm.volumeLeveling(it)})
             HorizontalDivider()
             Text("进度恢复提示 ${undoSecondsDraft.roundToInt()}s", style = MaterialTheme.typography.labelLarge)
             AppSlider(value = undoSecondsDraft, onValueChange = { undoSecondsDraft = it },
@@ -2012,22 +2181,17 @@ private fun coverBaseColor(title: String) =
             Text("书籍单独设置的播放速度和片头片尾时长优先。", style = MaterialTheme.typography.bodySmall)
             HorizontalDivider()
             Text("快退 ${settings.rewind} 秒", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(10, 15, 30).forEach { n ->
-                MotionFilterChip(selected = settings.rewind == n, onClick = { vm.skips(n, settings.forward) }, label = { Text("$n 秒") }) } }
+            GlassOptions(listOf(10,15,30).map{it to "$it 秒"},settings.rewind,{vm.skips(it,settings.forward)})
             Text("快进 ${settings.forward} 秒", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(15, 30, 60).forEach { n ->
-                MotionFilterChip(selected = settings.forward == n, onClick = { vm.skips(settings.rewind, n) }, label = { Text("$n 秒") }) } }
+            GlassOptions(listOf(15,30,60).map{it to "$it 秒"},settings.forward,{vm.skips(settings.rewind,it)})
             HorizontalDivider()
             Text("恢复收听回退 ${settings.resumeBack} 秒", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(0, 3, 5).forEach { n ->
-                MotionFilterChip(selected = settings.resumeBack == n, onClick = { vm.resumeBack(n) }, label = { Text("$n 秒") }) } }
+            GlassOptions(listOf(0,3,5).map{it to "$it 秒"},settings.resumeBack,{vm.resumeBack(it)})
             HorizontalDivider()
             Text("跳过片头 ${settings.intro} 秒", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(0, 5, 10, 30).forEach { n ->
-                MotionFilterChip(selected = settings.intro == n, onClick = { vm.skipEdges(n, settings.outro) }, label = { Text("$n 秒") }) } }
+            GlassOptions(listOf(0,5,10,30).map{it to "$it 秒"},settings.intro,{vm.skipEdges(it,settings.outro)})
             Text("跳过片尾 ${settings.outro} 秒", style = MaterialTheme.typography.labelLarge)
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) { listOf(0, 5, 10, 30).forEach { n ->
-                MotionFilterChip(selected = settings.outro == n, onClick = { vm.skipEdges(settings.intro, n) }, label = { Text("$n 秒") }) } }
+            GlassOptions(listOf(0,5,10,30).map{it to "$it 秒"},settings.outro,{vm.skipEdges(settings.intro,it)})
         }
         SettingsSection("耳机控制", "上一首与下一首按键功能", expanded == "headphones",
             { expanded = if (expanded == "headphones") "" else "headphones" }) {
@@ -2036,14 +2200,7 @@ private fun coverBaseColor(title: String) =
                 val selected = if (previous) settings.headphonePrevious else settings.headphoneNext
                 val choices = listOf("chapter" to if (previous) "上一章" else "下一章",
                     "rewind" to "快退 ${settings.rewind} 秒", "forward" to "快进 ${settings.forward} 秒", "none" to "不操作")
-                Column {
-                    choices.chunked(2).forEach { row ->
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            row.forEach { (value, label) -> MotionFilterChip(selected == value,
-                                onClick = { vm.headphoneAction(previous, value) }, label = { Text(label) }) }
-                        }
-                    }
-                }
+                GlassOptions(choices,selected,{vm.headphoneAction(previous,it)})
             }
             Text("适用于耳机媒体按键，不影响播放／暂停键。",
                 style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -2097,6 +2254,7 @@ private fun coverBaseColor(title: String) =
             { expanded = if (expanded == "backup") "" else "backup" }) {
             Text("备份包含书架、进度、已听标记、书签、统计、设置和封面，不含音频文件。导入前可查看冲突，已有同名书籍不会被覆盖。",
                 style = MaterialTheme.typography.bodySmall)
+            Text("此处为听书数据备份，不包含小说正文、阅读进度和自定义字体。请保留导入的小说与字体原文件。", style = MaterialTheme.typography.bodySmall)
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 MotionFilledTonalButton(onClick = exportBackup) { Text("导出备份") }
                 MotionFilledTonalButton(onClick = importBackup) { Text("导入备份") }
@@ -2122,6 +2280,8 @@ private fun coverBaseColor(title: String) =
         }
     }
 }
+
+private fun signedGlassPercentage(value:Float):String=value.roundToInt().let{if(it>0)"+$it%" else "$it%"}
 
 private fun clock(ms: Long): String {
     val seconds = TimeUnit.MILLISECONDS.toSeconds(ms.coerceAtLeast(0))

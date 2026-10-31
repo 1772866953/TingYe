@@ -1,0 +1,10 @@
+# Third party notices
+
+- Glass UI implementation adapted from Luma Vault / the local Password project, MIT. See Luma-Vault-MIT.txt.
+- React / React DOM, Motion, Lucide, Vite and TypeScript: MIT / ISC as specified in their source distributions. Electron is MIT and includes Chromium and other notices in the Windows distribution's LICENSE and LICENSES.chromium.html.
+- FunASR: MIT; SenseVoice Small code: MIT, weights: FunASR Model License. See sensevoice-code.txt and sensevoice-model.txt. Model source: https://modelscope.cn/models/iic/SenseVoiceSmall . Weights are installed separately on the user's computer.
+- PyTorch and Torchaudio: BSD-style licenses, shipped in the installed Python distributions. NVIDIA CUDA runtime components carry NVIDIA terms from the PyTorch wheel distributions.
+- Beautiful Soup (MIT), RapidFuzz (MIT), NumPy (BSD), SoundFile (BSD), Mutagen (GPL v2 or later) and their dependencies retain their licenses in the Python installation. Python is under the PSF License.
+- FFmpeg 7.1 essentials static Windows build from gyan.dev, distributed through imageio-ffmpeg 0.6.0; invoked as a separate executable for decoding. This build enables GPL and version3. See FFmpeg-GPL-3.0.txt. Build information and source references: https://www.gyan.dev/ffmpeg/builds/ and https://ffmpeg.org/download.html ; FFmpeg source for release n7.1: https://git.ffmpeg.org/ffmpeg.git/tag/n7.1 . The executable's `-version` option prints the full build configuration. Preserve these notices when redistributing.
+
+This app does not grant rights to redistribute source novels or recordings. Model terms must be checked before commercial distribution.

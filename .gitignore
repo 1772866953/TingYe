@@ -47,3 +47,30 @@ __pycache__/
 *.py[cod]
 .DS_Store
 Thumbs.db
+
+# Desktop generated binaries and local environments.
+/TingYeDesktop/resources/bin/*.exe
+/TingYeDesktop/resources/runtime/
+/TingYeDesktop/resources/models/
+
+
+/TingYeDesktop/resources/local-engine.json
+/TingYeDesktop/data/
+/TingYeDesktop/dist/
+/TingYeDesktop/release/
+/TingYeDesktop/node_modules/
+!/TingYeDesktop/build/
+!/TingYeDesktop/build/icon.svg
+!/TingYeDesktop/build/icon.png
+!/TingYeDesktop/build/icon.ico
+!/TingYeDesktop/build/installer.nsh
+
+# Local QA harnesses and development notes are not part of the public source.
+/qa/
+/docs/
+*.md
+!/README.md
+
+# Packaged downloads are published as release assets.
+*.exe
+*.blockmap

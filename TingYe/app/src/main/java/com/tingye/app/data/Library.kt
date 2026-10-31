@@ -6,6 +6,11 @@ import android.net.Uri
 import android.provider.DocumentsContract
 import androidx.documentfile.provider.DocumentFile
 import androidx.room.*
+import com.tingye.app.reader.ReadingBook
+import com.tingye.app.reader.ReadingSyncPoint
+import com.tingye.app.reader.ReaderDao
+import com.tingye.app.reader.ReadingSentence
+import com.tingye.app.reader.ReadingSyncImport
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import kotlinx.coroutines.Dispatchers
@@ -144,8 +149,35 @@ interface LibraryDao {
 @Entity(tableName = "listening_days")
 data class ListeningDay(@PrimaryKey val day: String, val durationMs: Long)
 
-@Database(entities = [Book::class, Chapter::class, Bookmark::class, ListeningDay::class], version = 4, exportSchema = true)
-abstract class LibraryDatabase : RoomDatabase() { abstract fun dao(): LibraryDao }
+@Database(entities = [Book::class, Chapter::class, Bookmark::class, ListeningDay::class, ReadingBook::class, ReadingSyncPoint::class, ReadingSentence::class, ReadingSyncImport::class], version = 7, exportSchema = true)
+abstract class LibraryDatabase : RoomDatabase() { abstract fun dao(): LibraryDao; abstract fun readerDao(): ReaderDao }
+
+val LIBRARY_MIGRATION_6_7 = object : Migration(6, 7) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS reading_sentences (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, readerId TEXT NOT NULL, textChapter INTEGER NOT NULL, textStart INTEGER NOT NULL, textEnd INTEGER NOT NULL, audioChapterId INTEGER NOT NULL, startMs INTEGER NOT NULL, endMs INTEGER NOT NULL, confidence REAL NOT NULL, FOREIGN KEY(readerId) REFERENCES reading_books(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(audioChapterId) REFERENCES chapters(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+        db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_reading_sentences_readerId_textChapter_textStart ON reading_sentences(readerId,textChapter,textStart)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_reading_sentences_readerId_audioChapterId_startMs ON reading_sentences(readerId,audioChapterId,startMs)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_reading_sentences_audioChapterId ON reading_sentences(audioChapterId)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS reading_sync_imports (readerId TEXT NOT NULL PRIMARY KEY, fileName TEXT NOT NULL, sentenceCount INTEGER NOT NULL, complete INTEGER NOT NULL, coverage REAL NOT NULL, importedAt INTEGER NOT NULL, FOREIGN KEY(readerId) REFERENCES reading_books(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+    }
+}
+
+val LIBRARY_MIGRATION_5_6 = object : Migration(5, 6) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        // Versions 5 and 6 have identical SQL schemas. Preserve all correspondence
+        // when restoring the 0.2.3 features; do not repeat the 0.2.4 data cleanup.
+    }
+}
+
+val LIBRARY_MIGRATION_4_5 = object : Migration(4, 5) {
+    override fun migrate(db: SupportSQLiteDatabase) {
+        db.execSQL("CREATE TABLE IF NOT EXISTS reading_books (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, author TEXT NOT NULL, format TEXT NOT NULL, chapterCount INTEGER NOT NULL, characterCount INTEGER NOT NULL, chapterIndex INTEGER NOT NULL, offset INTEGER NOT NULL, updatedAt INTEGER NOT NULL, audioBookId INTEGER, syncEnabled INTEGER NOT NULL, allowApproximate INTEGER NOT NULL, FOREIGN KEY(audioBookId) REFERENCES books(id) ON UPDATE NO ACTION ON DELETE SET NULL)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_reading_books_audioBookId ON reading_books(audioBookId)")
+        db.execSQL("CREATE TABLE IF NOT EXISTS reading_sync (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, readerId TEXT NOT NULL, textChapter INTEGER NOT NULL, textOffset INTEGER NOT NULL, audioChapterId INTEGER NOT NULL, positionMs INTEGER NOT NULL, kind TEXT NOT NULL, FOREIGN KEY(readerId) REFERENCES reading_books(id) ON UPDATE NO ACTION ON DELETE CASCADE, FOREIGN KEY(audioChapterId) REFERENCES chapters(id) ON UPDATE NO ACTION ON DELETE CASCADE)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_reading_sync_readerId ON reading_sync(readerId)")
+        db.execSQL("CREATE INDEX IF NOT EXISTS index_reading_sync_audioChapterId ON reading_sync(audioChapterId)")
+    }
+}
 
 val LIBRARY_MIGRATION_3_4 = object : Migration(3, 4) {
     override fun migrate(db: SupportSQLiteDatabase) {
